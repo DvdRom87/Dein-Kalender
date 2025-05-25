@@ -15,7 +15,7 @@ let lastPreviewRecalculationTargetKey = null;
 let activeResizeOperationCache = {
   currentView: null,
   daysContainer: null,
-  allDayColumns: [],
+  allDayColumns: [], // Will store {element, rect} for each day column
 };
 
 const THROTTLE_LIMIT_MS = 100;
@@ -26,7 +26,7 @@ const PREVIEW_SEGMENT_CLASS = "resize-preview-segment";
 const WEEK_RESIZE_PREVIEW_CLASS = "week-resize-preview-block";
 const RESIZE_TARGET_HOVER_CLASS = "resize-target-hover";
 const COLLIDING_PREVIEW_CLASS = "colliding";
-const HOUR_HEIGHT_IN_WEEK_VIEW = 40;
+const HOUR_HEIGHT_IN_WEEK_VIEW = 40; // Assuming this is defined or accessible, used by calendarGrid.js too
 
 function throttle(func, limit) {
   let timeoutId = null;
@@ -114,14 +114,15 @@ function prepareLuxonDtsForPreview(eventDataForPreview, displayZone) {
   if (!previewCopy._startDt || !previewCopy._startDt.isValid) previewCopy._startDt = luxon.DateTime.invalid("preview start invalid final check");
   if (!previewCopy._endDt || !previewCopy._endDt.isValid) previewCopy._endDt = luxon.DateTime.invalid("preview end invalid final check");
   if (previewCopy._startDt.isValid && previewCopy._endDt.isValid && previewCopy._endDt < previewCopy._startDt) {
-    previewCopy._endDt = previewCopy._startDt.plus({ hours: 1 });
+    previewCopy._endDt = previewCopy._startDt.plus({ hours: 1 }); // Ensure end is not before start
   }
   return previewCopy;
 }
 
 function _buildRenderedEventLevelsCache(currentView, resizedEventOriginalId, visibleContextElements) {
   const cache = new Map();
-  const eventSelector = currentView === "week" && originalResizedEvent && !originalResizedEvent._isAllDay ? null : currentView === "week" && originalResizedEvent && originalResizedEvent._isAllDay ? `.week-all-day-event-segment[data-event-id][data-level]` : `.event-overlay[data-event-id][data-level]`;
+  // Adjusted selector for all-day events in week/day view
+  const eventSelector = (currentView === "week" || currentView === "day") && originalResizedEvent && originalResizedEvent._isAllDay ? `.week-all-day-event-segment[data-event-id][data-level]` : currentView === "month" || currentView === "year" ? `.event-overlay[data-event-id][data-level]` : null; // Timed week/day events don't use this level cache in the same way
 
   if (!eventSelector) return cache;
 
@@ -266,7 +267,8 @@ function renderMonthYearResizePreview(previewEventData, viewConfigForPreview) {
   if (previewEventData) previewEventData._isOverallCollidingPreview = anySegmentHidden;
 }
 
-function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
+function renderWeekDayViewResizePreview(previewEventData, viewConfigForPreview) {
+  // Renamed for clarity
   const eventData = prepareLuxonDtsForPreview(previewEventData, viewConfigForPreview.displayZone);
   if (!eventData._startDt.isValid || !eventData._endDt.isValid) {
     return;
@@ -276,15 +278,19 @@ function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
   let overallEventVisualEnd = eventData._endDt.setZone(viewConfigForPreview.displayZone);
   if (eventData._isAllDay) overallEventVisualEnd = overallEventVisualEnd.startOf("day");
 
-  const weekDayColumns = activeResizeOperationCache.allDayColumns.map((colData) => colData.element); // Use cached elements
-  if (weekDayColumns.length !== 7) {
-    // Should still check, though cache should be reliable
+  const dayColumnsData = activeResizeOperationCache.allDayColumns; // Use cached elements {element, rect}
+  if (!dayColumnsData || dayColumnsData.length === 0) {
     // Fallback if cache somehow failed (should not happen if mousedown populates it)
     const freshCols = Array.from(document.querySelectorAll(".week-day-column[data-date]"));
-    if (freshCols.length === 7) weekDayColumns.splice(0, weekDayColumns.length, ...freshCols);
-    else return;
+    if (freshCols.length > 0) {
+      activeResizeOperationCache.allDayColumns = freshCols.map((col) => ({ element: col, rect: col.getBoundingClientRect() }));
+      dayColumnsData.splice(0, dayColumnsData.length, ...activeResizeOperationCache.allDayColumns); // Update local var if needed
+    } else {
+      return;
+    }
   }
-  const weekViewStartDt = luxon.DateTime.fromISO(weekDayColumns[0].dataset.date, { zone: viewConfigForPreview.displayZone });
+  const viewStartDt = luxon.DateTime.fromISO(dayColumnsData[0].element.dataset.date, { zone: viewConfigForPreview.displayZone });
+  const numDaysInCurrentView = dayColumnsData.length;
 
   let isOverallColliding = previewEventData._isOverallCollidingPreview || false;
 
@@ -292,15 +298,16 @@ function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
     const allDayRow = document.querySelector(".week-all-day-row");
     if (!allDayRow) return;
 
-    const weekSpecificOtherEvents = (originalResizedEvent._otherEventsCache || []).filter((e) => e._isAllDay && e._startDt.isValid && e._endDt.isValid && e._startDt.setZone(viewConfigForPreview.displayZone) < weekViewStartDt.endOf("week") && e._endDt.setZone(viewConfigForPreview.displayZone) >= weekViewStartDt.startOf("week"));
+    const viewEndDt = viewStartDt.plus({ days: numDaysInCurrentView - 1 });
+    const weekSpecificOtherEvents = (originalResizedEvent._otherEventsCache || []).filter((e) => e._isAllDay && e._startDt.isValid && e._endDt.isValid && e._startDt.setZone(viewConfigForPreview.displayZone) < viewEndDt.endOf("day") && e._endDt.setZone(viewConfigForPreview.displayZone) >= viewStartDt.startOf("day"));
     const renderedEventLevels = originalResizedEvent._renderedEventLevelsCache || new Map();
 
-    let currentProcessingDay = luxon.DateTime.max(overallEventVisualStart.startOf("day"), weekViewStartDt.startOf("week"));
-    const weekActualEnd = luxon.DateTime.min(overallEventVisualEnd.startOf("day"), weekViewStartDt.endOf("week"));
+    let currentProcessingDay = luxon.DateTime.max(overallEventVisualStart.startOf("day"), viewStartDt.startOf("day"));
+    const viewActualEndForEvent = luxon.DateTime.min(overallEventVisualEnd.startOf("day"), viewEndDt.startOf("day"));
 
-    if (currentProcessingDay.isValid && weekActualEnd.isValid && currentProcessingDay <= weekActualEnd) {
+    if (currentProcessingDay.isValid && viewActualEndForEvent.isValid && currentProcessingDay <= viewActualEndForEvent) {
       const segmentStartDate = currentProcessingDay;
-      const segmentEndDate = weekActualEnd;
+      const segmentEndDate = viewActualEndForEvent;
       const segmentDataForLevelFinding = {
         segmentStartDt: segmentStartDate,
         segmentEndDt: segmentEndDate,
@@ -311,24 +318,27 @@ function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
       if (segmentTargetLevel >= viewConfigForPreview.maxPlacementLevels) isOverallColliding = true;
 
       let segmentStartDayIndex = -1;
-      for (let i = 0; i < 7; i++) {
-        const dayInGrid = weekViewStartDt.plus({ days: i });
+      for (let i = 0; i < numDaysInCurrentView; i++) {
+        const dayInGrid = viewStartDt.plus({ days: i });
         if (dayInGrid >= segmentStartDate && dayInGrid <= segmentEndDate) {
           if (segmentStartDayIndex === -1) segmentStartDayIndex = i;
-          if (i === 6 || dayInGrid.equals(segmentEndDate)) {
+          // Check if this is the last day of the segment within the current view's span
+          if (i === numDaysInCurrentView - 1 || dayInGrid.equals(segmentEndDate)) {
             const numDaysInDisplaySegment = i - segmentStartDayIndex + 1;
-            const firstSlotOfDisplaySegment = allDayRow.querySelector(`.week-all-day-slot[data-date="${weekViewStartDt.plus({ days: segmentStartDayIndex }).toFormat("yyyy-MM-dd")}"]`);
+            const firstSlotOfDisplaySegment = allDayRow.querySelector(`.week-all-day-slot[data-date="${viewStartDt.plus({ days: segmentStartDayIndex }).toFormat("yyyy-MM-dd")}"]`);
             if (firstSlotOfDisplaySegment) {
               const previewBlock = document.createElement("div");
-              previewBlock.className = PREVIEW_SEGMENT_CLASS;
+              previewBlock.className = PREVIEW_SEGMENT_CLASS; // Using PREVIEW_SEGMENT_CLASS for all-day as it's more like month/year segments
               if (isOverallColliding) previewBlock.classList.add(COLLIDING_PREVIEW_CLASS);
               previewBlock.style.backgroundColor = eventData.color ? `${eventData.color}99` : `rgba(59, 130, 246, 0.6)`;
               previewBlock.style.position = "absolute";
               previewBlock.style.top = `${segmentTargetLevel * (viewConfigForPreview.overlayHeight + viewConfigForPreview.verticalSpacing)}px`;
               previewBlock.style.height = `${viewConfigForPreview.overlayHeight}px`;
+
               const slotWidth = firstSlotOfDisplaySegment.offsetWidth;
               previewBlock.style.left = `${firstSlotOfDisplaySegment.offsetLeft}px`;
-              previewBlock.style.width = `${numDaysInDisplaySegment * slotWidth - (numDaysInDisplaySegment > 1 ? 2 : 0)}px`;
+              previewBlock.style.width = `${numDaysInDisplaySegment * slotWidth - (numDaysInDisplaySegment > 1 && numDaysInCurrentView > 1 ? 2 : 0)}px`; // -2 for gap if multi-day in week view
+
               previewBlock.textContent = eventData.name;
               allDayRow.appendChild(previewBlock);
             }
@@ -338,10 +348,11 @@ function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
       }
     }
   } else {
-    isOverallColliding = checkBasicResizePreviewCollision(eventData, resizedEventId, "week", viewConfigForPreview.displayZone);
-    for (let i = 0; i < 7; i++) {
-      const currentColumnDay = weekViewStartDt.plus({ days: i });
-      const dayColumn = weekDayColumns[i];
+    // Timed event
+    isOverallColliding = checkBasicResizePreviewCollision(eventData, resizedEventId, activeResizeOperationCache.currentView, viewConfigForPreview.displayZone);
+    for (let i = 0; i < numDaysInCurrentView; i++) {
+      const currentColumnDay = viewStartDt.plus({ days: i });
+      const dayColumnElement = dayColumnsData[i].element;
       if (!eventData._startDt.isValid || !eventData._endDt.isValid) continue;
 
       const eventIntervalUtc = luxon.Interval.fromDateTimes(eventData._startDt, eventData._endDt);
@@ -354,26 +365,28 @@ function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
       const endDisp = eventData._endDt.setZone(viewConfigForPreview.displayZone);
       let eventStartHourFraction = 0;
       if (startDisp.hasSame(currentColumnDay, "day")) eventStartHourFraction = startDisp.hour + startDisp.minute / 60;
+
       let eventEndHourFraction = 24;
       if (endDisp.hasSame(currentColumnDay, "day")) {
         eventEndHourFraction = endDisp.hour + endDisp.minute / 60;
+        // If event ends at 00:00 on the same day it started, it means 0 duration, skip
         if (eventEndHourFraction === 0 && startDisp.hasSame(endDisp, "day")) continue;
       }
-      if (eventEndHourFraction === 0 && endDisp.startOf("day").equals(currentColumnDay.plus({ days: 1 })) && !startDisp.hasSame(endDisp, "day")) {
-        // Ends at midnight of the next day, so fills current day
-      } else if (eventEndHourFraction === 0 && endDisp.startOf("day").equals(currentColumnDay) && !startDisp.hasSame(endDisp, "day")) {
+      // If event ends at 00:00 of the *next* day, it fills current day until 24:00
+      // If event ends at 00:00 of *current* day but started *before* current day, it means it doesn't show on current day.
+      if (eventEndHourFraction === 0 && endDisp.startOf("day").equals(currentColumnDay) && !startDisp.hasSame(endDisp, "day")) {
         continue;
       }
 
       if (eventEndHourFraction <= eventStartHourFraction && startDisp.hasSame(endDisp, "day")) {
-        if (startDisp.equals(endDisp)) continue;
-        eventEndHourFraction = eventStartHourFraction + 15 / 60;
+        if (startDisp.equals(endDisp)) continue; // Truly zero duration
+        eventEndHourFraction = eventStartHourFraction + 15 / 60; // Min 15 min visual
       }
 
       const top = eventStartHourFraction * HOUR_HEIGHT_IN_WEEK_VIEW;
       let height = (eventEndHourFraction - eventStartHourFraction) * HOUR_HEIGHT_IN_WEEK_VIEW;
 
-      if (height <= 1 && height > 0) height = HOUR_HEIGHT_IN_WEEK_VIEW / 4;
+      if (height <= 1 && height > 0) height = HOUR_HEIGHT_IN_WEEK_VIEW / 4; // Min visual height
       if (height <= 0) continue;
 
       const previewBlock = document.createElement("div");
@@ -382,11 +395,11 @@ function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
       previewBlock.style.backgroundColor = eventData.color ? `${eventData.color}99` : `rgba(59, 130, 246, 0.6)`;
       previewBlock.style.top = `${top}px`;
       previewBlock.style.height = `${height}px`;
-      previewBlock.style.left = `0%`;
-      previewBlock.style.width = `calc(100% - 4px)`;
+      previewBlock.style.left = `0%`; // Will be positioned within the day column
+      previewBlock.style.width = `calc(100% - 4px)`; // Standard width within column
       previewBlock.style.marginLeft = `2px`;
       if (currentColumnDay.hasSame(startDisp, "day")) previewBlock.textContent = `${eventData.name}`;
-      dayColumn.appendChild(previewBlock);
+      dayColumnElement.appendChild(previewBlock);
     }
   }
   if (previewEventData) previewEventData._isOverallCollidingPreview = isOverallColliding;
@@ -394,12 +407,12 @@ function renderWeekViewResizePreview(previewEventData, viewConfigForPreview) {
 
 function renderResizePreview(previewEventData) {
   clearResizePreview();
-  const displayZone = resizeCurrentViewAppZone; // Use cached app zone
+  const displayZone = resizeCurrentViewAppZone;
 
   const viewConfigForPreview = {
-    viewName: activeResizeOperationCache.currentView, // Use cached view
-    overlayHeight: activeResizeOperationCache.currentView === "year" ? 5 : activeResizeOperationCache.currentView === "month" ? 18 : 18,
-    verticalSpacing: activeResizeOperationCache.currentView === "year" ? 1 : activeResizeOperationCache.currentView === "month" ? 3 : 2,
+    viewName: activeResizeOperationCache.currentView,
+    overlayHeight: activeResizeOperationCache.currentView === "year" ? 5 : activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day" ? 18 : 18,
+    verticalSpacing: activeResizeOperationCache.currentView === "year" ? 1 : activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day" ? 3 : 2,
     maxPlacementLevels: activeResizeOperationCache.currentView === "year" ? 3 : 3,
     displayZone: displayZone,
     hourHeightPx: HOUR_HEIGHT_IN_WEEK_VIEW,
@@ -408,8 +421,8 @@ function renderResizePreview(previewEventData) {
   if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year") {
     if (typeof window.createEventSegmentElement !== "function") return;
     renderMonthYearResizePreview(previewEventData, viewConfigForPreview);
-  } else if (activeResizeOperationCache.currentView === "week") {
-    renderWeekViewResizePreview(previewEventData, viewConfigForPreview);
+  } else if (activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day") {
+    renderWeekDayViewResizePreview(previewEventData, viewConfigForPreview);
   }
 }
 
@@ -419,7 +432,7 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
   const originalStartTimezone = originalEvent.startTimezone || appZone;
   const originalEndTimezone = originalEvent.endTimezone || appZone;
 
-  if (currentView === "week" && !isOriginalAllDay && (resizeMode === "top" || resizeMode === "bottom")) {
+  if ((currentView === "week" || currentView === "day") && !isOriginalAllDay && (resizeMode === "top" || resizeMode === "bottom")) {
     const targetDateStr = newTargetInfo.dateString;
     let targetHour = newTargetInfo.hour;
     const targetMinute = newTargetInfo.minute || 0;
@@ -429,7 +442,7 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
     const originalEndDt = originalEvent._endDt && originalEvent._endDt.isValid ? originalEvent._endDt : luxon.DateTime.fromISO(originalEvent.end_utc, { zone: "utc" });
 
     if (!originalStartDt.isValid || !originalEndDt.isValid) {
-      console.warn("Week timed resize: Invalid original Luxon dates.");
+      console.warn("Week/Day timed resize: Invalid original Luxon dates.");
       return updatedEvent;
     }
 
@@ -442,12 +455,17 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
     } else {
       // resizeMode === "bottom"
       newStartLocal = originalStartDt.setZone(originalStartTimezone);
+      // For bottom resize, the targetHour effectively means the END of that hour slot
       if (typeof newTargetInfo.minute === "number" && newTargetInfo.minute !== 0) {
+        // if specific minute is given (less likely for pure slot drag)
         newEndLocal = luxon.DateTime.fromISO(targetDateStr, { zone: originalEndTimezone }).set({ hour: targetHour, minute: targetMinute });
       } else {
+        // Assume targetHour means the slot ending at targetHour+1 or lasting through targetHour
         newEndLocal = luxon.DateTime.fromISO(targetDateStr, { zone: originalEndTimezone }).set({ hour: targetHour, minute: 0 }).plus({ hours: 1 });
       }
+
       if (newStartLocal.isValid && newEndLocal.isValid && newEndLocal.toUTC() <= newStartLocal.toUTC()) {
+        // If end is before or same as start, make it at least 15 min after start
         newEndLocal = newStartLocal.setZone(originalEndTimezone).plus({ minutes: 15 });
       }
     }
@@ -492,7 +510,7 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
       delete updatedEvent.startTimezone;
       delete updatedEvent.endTimezone;
     } else {
-      // Timed event, date-handle resize (Month/Year view or similar)
+      // Timed event, date-handle resize (Month/Year view)
       const origStartStr = originalEvent.time || "00:00";
       const origEndStr = originalEvent.endTime || "00:00"; // Should exist for well-formed timed events
 
@@ -520,11 +538,17 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
       const [eH, eM] = origEndStr.split(":").map(Number);
 
       let finalNewStartLocal = finalEffectiveStartDate.setZone(originalEvent.startTimezone || appZone).set({ hour: sH, minute: sM });
-
       let finalNewEndLocal = finalEffectiveEndDate.setZone(originalEvent.endTimezone || appZone).set({ hour: eH, minute: eM });
 
       if (finalNewStartLocal.toUTC() >= finalNewEndLocal.toUTC()) {
-        finalNewEndLocal = finalNewEndLocal.plus({ days: 1 });
+        finalNewEndLocal = finalNewStartLocal.setZone(originalEvent.endTimezone || appZone).plus({ hours: 1 });
+        if (finalNewStartLocal.hasSame(finalNewEndLocal, "day")) {
+          if (resizeMode === "start" && finalEffectiveStartDate.equals(finalEffectiveEndDate)) {
+            finalNewEndLocal = finalNewEndLocal.plus({ days: 1 });
+          } else if (finalNewStartLocal.toMillis() === finalNewEndLocal.toMillis()) {
+            finalNewEndLocal = finalNewEndLocal.plus({ hours: 1 });
+          }
+        }
       }
 
       if (finalNewStartLocal && finalNewStartLocal.isValid) {
@@ -545,7 +569,7 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
 }
 
 function checkBasicResizePreviewCollision(previewEventData, resizedEventOriginalId, currentView, appDisplayZone) {
-  if (currentView !== "week" || previewEventData._isAllDay) return false;
+  if ((currentView !== "week" && currentView !== "day") || previewEventData._isAllDay) return false;
   if (!previewEventData._startDt || !previewEventData._startDt.isValid || !previewEventData._endDt || !previewEventData._endDt.isValid) return false;
 
   const previewStart = previewEventData._startDt.setZone(appDisplayZone);
@@ -553,10 +577,11 @@ function checkBasicResizePreviewCollision(previewEventData, resizedEventOriginal
 
   const otherEvents = (originalResizedEvent?._otherEventsCache || []).filter((e) => !e._isAllDay && e.start_utc && e.end_utc);
 
-  let iterEndDayTimed = previewEnd.minus({ seconds: 1 }).startOf("day");
+  let iterEndDayTimed = previewEnd.startOf("day");
   if (previewEnd.hour === 0 && previewEnd.minute === 0 && previewEnd.second === 0 && !previewStart.hasSame(previewEnd, "day")) {
     iterEndDayTimed = previewEnd.minus({ days: 1 }).startOf("day");
   }
+  if (iterEndDayTimed < previewStart.startOf("day")) iterEndDayTimed = previewStart.startOf("day");
 
   for (let dayIter = previewStart.startOf("day"); dayIter <= iterEndDayTimed; dayIter = dayIter.plus({ days: 1 })) {
     const effectivePreviewStart = luxon.DateTime.max(previewStart, dayIter.startOf("day"));
@@ -622,10 +647,10 @@ function handleMouseDownOnOverlay(event) {
   const overlayWidth = overlay.offsetWidth;
   const overlayHeight = overlay.offsetHeight;
   let localResizeMode = null;
-  const currentViewValue = viewSelect.value; // Get view once
+  const currentViewValue = viewSelect.value;
   const isEventBeingResizedAllDay = eventDataForResizeInit._isAllDay;
 
-  if (currentViewValue === "week" && overlay.classList.contains("week-event-block") && !isEventBeingResizedAllDay) {
+  if ((currentViewValue === "week" || currentViewValue === "day") && overlay.classList.contains("week-event-block") && !isEventBeingResizedAllDay) {
     if (offsetY < RESIZE_HANDLE_WIDTH_PX) localResizeMode = "top";
     else if (offsetY > overlayHeight - RESIZE_HANDLE_WIDTH_PX) localResizeMode = "bottom";
   } else if (overlay.classList.contains("event-overlay") || overlay.classList.contains("week-all-day-event-segment")) {
@@ -655,14 +680,16 @@ function handleMouseDownOnOverlay(event) {
     currentHoverTargetElement = null;
     lastPreviewRecalculationTargetKey = null;
 
-    // Populate activeResizeOperationCache
     activeResizeOperationCache.currentView = currentViewValue;
-    if (currentViewValue === "week") {
-      activeResizeOperationCache.daysContainer = document.querySelector(".week-days-container");
+    if (currentViewValue === "week" || currentViewValue === "day") {
+      activeResizeOperationCache.daysContainer = document.querySelector(`.${currentViewValue}-view .week-days-container`);
+      if (!activeResizeOperationCache.daysContainer) activeResizeOperationCache.daysContainer = document.querySelector(".week-days-container");
+
       if (activeResizeOperationCache.daysContainer) {
         activeResizeOperationCache.allDayColumns = Array.from(activeResizeOperationCache.daysContainer.querySelectorAll(".week-day-column[data-date]")).map((col) => ({ element: col, rect: col.getBoundingClientRect() }));
       } else {
-        activeResizeOperationCache.allDayColumns = [];
+        activeResizeOperationCache.allDayColumns = Array.from(document.querySelectorAll(`.calendar-container.${currentViewValue}-view .week-day-column[data-date]`)).map((col) => ({ element: col, rect: col.getBoundingClientRect() }));
+        if (activeResizeOperationCache.allDayColumns.length === 0) console.warn("Could not find day columns for resize cache.");
       }
     } else {
       activeResizeOperationCache.daysContainer = null;
@@ -682,12 +709,16 @@ function handleMouseDownOnOverlay(event) {
       .filter(Boolean);
 
     let visibleContexts = [];
-    if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year" || (activeResizeOperationCache.currentView === "week" && originalResizedEvent._isAllDay)) {
+    if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year" || ((activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day") && originalResizedEvent._isAllDay)) {
       if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year") {
         visibleContexts = Array.from(document.querySelectorAll(".month-card"));
       } else {
-        const allDayRow = document.querySelector(".week-all-day-row");
+        const allDayRow = document.querySelector(`.${activeResizeOperationCache.currentView}-view .week-all-day-row`);
         if (allDayRow) visibleContexts = [allDayRow];
+        else {
+          const genericAllDayRow = document.querySelector(".week-all-day-row");
+          if (genericAllDayRow) visibleContexts = [genericAllDayRow];
+        }
       }
       originalResizedEvent._renderedEventLevelsCache = _buildRenderedEventLevelsCache(activeResizeOperationCache.currentView, resizedEventId, visibleContexts);
     } else {
@@ -720,11 +751,10 @@ function handleDocumentMouseMove(event) {
   const isOriginalTimed = originalResizedEvent && !originalResizedEvent._isAllDay;
   const hasValidOriginalDates = originalResizedEvent && originalResizedEvent._startDt && originalResizedEvent._startDt.isValid;
 
-  if (activeResizeOperationCache.currentView === "week" && isOriginalTimed && hasValidOriginalDates && (resizeMode === "top" || resizeMode === "bottom")) {
-    if (activeResizeOperationCache.daysContainer && activeResizeOperationCache.allDayColumns.length > 0) {
+  if ((activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day") && isOriginalTimed && hasValidOriginalDates && (resizeMode === "top" || resizeMode === "bottom")) {
+    if (activeResizeOperationCache.allDayColumns.length > 0) {
       let targetDayColumnData = null;
       for (const colData of activeResizeOperationCache.allDayColumns) {
-        // Use cached rect
         if (event.clientX >= colData.rect.left && event.clientX <= colData.rect.right) {
           targetDayColumnData = colData;
           break;
@@ -732,7 +762,7 @@ function handleDocumentMouseMove(event) {
       }
 
       if (targetDayColumnData && targetDayColumnData.element.dataset.date) {
-        const relativeYInColumn = event.clientY - targetDayColumnData.rect.top; // Use cached rect.top
+        const relativeYInColumn = event.clientY - targetDayColumnData.rect.top;
         let hourIndex = Math.floor(relativeYInColumn / HOUR_HEIGHT_IN_WEEK_VIEW);
         hourIndex = Math.max(0, Math.min(23, hourIndex));
 
@@ -768,14 +798,17 @@ function handleDocumentMouseMove(event) {
 
     if (currentTargetKey && (currentTargetKey !== lastPreviewRecalculationTargetKey || lastPreviewRecalculationTargetKey === null)) {
       lastPreviewRecalculationTargetKey = currentTargetKey;
-      let visibleContexts = [];
-      if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year" || (activeResizeOperationCache.currentView === "week" && preparedPreviewData._isAllDay)) {
-        if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year") visibleContexts = Array.from(document.querySelectorAll(".month-card"));
-        else {
-          const allDayRow = document.querySelector(".week-all-day-row");
-          if (allDayRow) visibleContexts = [allDayRow];
+      if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year" || ((activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day") && preparedPreviewData._isAllDay)) {
+        let visibleContexts = [];
+        if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year") {
+          visibleContexts = Array.from(document.querySelectorAll(".month-card"));
+        } else {
+          const allDayRowContainer = document.querySelector(`.${activeResizeOperationCache.currentView}-view .week-all-day-row`) || document.querySelector(".week-all-day-row");
+          if (allDayRowContainer) visibleContexts = [allDayRowContainer];
         }
-        if (originalResizedEvent && visibleContexts.length > 0) originalResizedEvent._renderedEventLevelsCache = _buildRenderedEventLevelsCache(activeResizeOperationCache.currentView, resizedEventId, visibleContexts);
+        if (originalResizedEvent && visibleContexts.length > 0) {
+          originalResizedEvent._renderedEventLevelsCache = _buildRenderedEventLevelsCache(activeResizeOperationCache.currentView, resizedEventId, visibleContexts);
+        }
       }
     }
     throttledRenderPreview(preparedPreviewData);
@@ -800,7 +833,6 @@ function handleDocumentMouseUp(event) {
   resetPointerEventsAndPreview();
   document.querySelectorAll(`.${RESIZING_ORIGINAL_HIDDEN_CLASS}[data-event-id="${resizedEventId}"]`).forEach((seg) => seg.classList.remove(RESIZING_ORIGINAL_HIDDEN_CLASS));
 
-  // Use cached currentView
   const eventToUpdate = customEvents.find((e) => e.id === resizedEventId);
 
   if (!eventToUpdate) {
@@ -828,7 +860,7 @@ function handleDocumentMouseUp(event) {
   Object.assign(eventToUpdate, finalEventProperties);
 
   if (typeof saveEvents === "function") saveEvents();
-  resetResizeState(); // This will also clear activeResizeOperationCache
+  resetResizeState();
   if (typeof window.renderEventVisuals === "function") requestAnimationFrame(window.renderEventVisuals);
 }
 
@@ -851,7 +883,6 @@ function resetResizeStateOnly() {
   resizeCurrentViewAppZone = "UTC";
   lastPreviewRecalculationTargetKey = null;
 
-  // Clear the operation cache
   activeResizeOperationCache.currentView = null;
   activeResizeOperationCache.daysContainer = null;
   activeResizeOperationCache.allDayColumns = [];
@@ -866,7 +897,7 @@ function resetResizeState() {
   if (typeof throttledRenderPreview.cancel === "function") {
     throttledRenderPreview.cancel();
   }
-  resetResizeStateOnly(); // This now clears activeResizeOperationCache
+  resetResizeStateOnly();
   document.removeEventListener("mousemove", handleDocumentMouseMove);
   document.removeEventListener("mouseup", handleDocumentMouseUp);
   document.body.style.cursor = "";
@@ -896,7 +927,7 @@ function handleOverlayMouseMoveForCursor(event) {
   const currentView = document.getElementById("view-select")?.value || "month";
   let cursor = "move";
 
-  if (currentView === "week" && overlay.classList.contains("week-event-block")) {
+  if ((currentView === "week" || currentView === "day") && overlay.classList.contains("week-event-block")) {
     const eventId = overlay.dataset.eventId;
     if (eventId) {
       const eventData = customEvents.find((e) => e.id === eventId);
@@ -906,8 +937,9 @@ function handleOverlayMouseMoveForCursor(event) {
       }
     }
   } else {
-    const isStartSegment = overlay.classList.contains("event-overlay-start") || (currentView === "week" && overlay.classList.contains("week-all-day-event-segment"));
-    const isEndSegment = overlay.classList.contains("event-overlay-end") || (currentView === "week" && overlay.classList.contains("week-all-day-event-segment"));
+    const isStartSegment = overlay.classList.contains("event-overlay-start") || ((currentView === "week" || currentView === "day") && overlay.classList.contains("week-all-day-event-segment"));
+    const isEndSegment = overlay.classList.contains("event-overlay-end") || ((currentView === "week" || currentView === "day") && overlay.classList.contains("week-all-day-event-segment"));
+
     let handleThreshold = RESIZE_HANDLE_WIDTH_PX;
     const eventId = overlay.dataset.eventId;
     if (eventId) {
@@ -917,6 +949,7 @@ function handleOverlayMouseMoveForCursor(event) {
         handleThreshold = Math.max(overlayWidth / 2.5, 5);
       }
     }
+
     if (isStartSegment && offsetX < handleThreshold) cursor = "ew-resize";
     else if (isEndSegment && offsetX > overlayWidth - handleThreshold) cursor = "ew-resize";
   }

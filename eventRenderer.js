@@ -320,32 +320,34 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
   const ALL_DAY_VERTICAL_SPACING_PX = 2;
   const MAX_ALL_DAY_LEVELS = 3;
 
-  const weekContentContainer = document.querySelector(".calendar-container.week-view .week-grid-content");
+  const weekContentContainer = document.querySelector(".calendar-container.week-view .week-grid-content, .calendar-container.day-view .week-grid-content");
   if (!weekContentContainer) return;
 
   const dayColumns = dayColumnElements;
-  if (!dayColumns || dayColumns.length !== 7) {
-    console.error("Week view day columns not properly initialized or passed to renderWeekViewEvents.");
+  if (!dayColumns || dayColumns.length === 0) {
+    console.error("Week/Day view day columns not properly initialized or passed.");
     return;
   }
+  const numDaysInView = dayColumns.length; // Will be 1 for Day view, 7 for Week view
+
   const allDaySlotsContainer = weekContentContainer.querySelector(".week-all-day-row");
 
-  const startOfWeekDt = luxon.DateTime.fromISO(dayColumns[0].dataset.date, { zone: viewConfig.displayZone }).startOf("day");
-  const endOfWeekDt = luxon.DateTime.fromISO(dayColumns[6].dataset.date, { zone: viewConfig.displayZone }).endOf("day");
+  const viewStartDt = luxon.DateTime.fromISO(dayColumns[0].dataset.date, { zone: viewConfig.displayZone }).startOf("day");
+  const viewEndDt = luxon.DateTime.fromISO(dayColumns[numDaysInView - 1].dataset.date, { zone: viewConfig.displayZone }).endOf("day");
 
-  const eventsInWeek = eventsToRender.filter((event) => {
+  const eventsInView = eventsToRender.filter((event) => {
     const eventStartDisp = event._startDt.setZone(viewConfig.displayZone);
     const eventEndDisp = luxon.DateTime.max(eventStartDisp, event._endDt.setZone(viewConfig.displayZone)); // Ensure end is not before start
     const eventInterval = luxon.Interval.fromDateTimes(eventStartDisp, eventEndDisp);
-    const weekInterval = luxon.Interval.fromDateTimes(startOfWeekDt, endOfWeekDt);
-    return eventInterval.overlaps(weekInterval);
+    const currentViewInterval = luxon.Interval.fromDateTimes(viewStartDt, viewEndDt);
+    return eventInterval.overlaps(currentViewInterval);
   });
 
   // --- All-Day Events Rendering ---
-  const allDayEvents = eventsInWeek.filter((e) => e._isAllDay);
+  const allDayEvents = eventsInView.filter((e) => e._isAllDay);
   const allDayLevels = []; // Each element is an array for a day, storing event IDs at that level
-  for (let i = 0; i < MAX_ALL_DAY_LEVELS; i++) allDayLevels.push(new Array(7).fill(null));
-  const hiddenAllDayCounts = new Array(7).fill(0);
+  for (let i = 0; i < MAX_ALL_DAY_LEVELS; i++) allDayLevels.push(new Array(numDaysInView).fill(null));
+  const hiddenAllDayCounts = new Array(numDaysInView).fill(0);
 
   allDayEvents.forEach((event) => {
     const eventStartDay = event._startDt.setZone(viewConfig.displayZone).startOf("day");
@@ -353,8 +355,8 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
     let placed = false;
     for (let level = 0; level < MAX_ALL_DAY_LEVELS; level++) {
       let canPlace = true;
-      for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-        const currentDayInGrid = startOfWeekDt.plus({ days: dayIdx });
+      for (let dayIdx = 0; dayIdx < numDaysInView; dayIdx++) {
+        const currentDayInGrid = viewStartDt.plus({ days: dayIdx });
         if (currentDayInGrid >= eventStartDay && currentDayInGrid <= eventEndDay) {
           // Check if event spans this day
           if (allDayLevels[level][dayIdx] !== null) {
@@ -367,15 +369,14 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
 
       if (canPlace) {
         let segmentStartIndex = -1;
-        for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-          const currentDayInGrid = startOfWeekDt.plus({ days: dayIdx });
+        for (let dayIdx = 0; dayIdx < numDaysInView; dayIdx++) {
+          const currentDayInGrid = viewStartDt.plus({ days: dayIdx });
           if (currentDayInGrid >= eventStartDay && currentDayInGrid <= eventEndDay) {
             allDayLevels[level][dayIdx] = event.id; // Mark level as occupied by this event
             if (segmentStartIndex === -1) segmentStartIndex = dayIdx;
 
-            // If it's the last day of the week OR the last day of the event segment within this week
-            if (dayIdx === 6 || currentDayInGrid.equals(eventEndDay) || !(startOfWeekDt.plus({ days: dayIdx + 1 }) >= eventStartDay && startOfWeekDt.plus({ days: dayIdx + 1 }) <= eventEndDay)) {
-              const targetAllDaySlot = allDaySlotsContainer.children[segmentStartIndex + 1]; // +1 to skip label cell
+            if (dayIdx === numDaysInView - 1 || currentDayInGrid.equals(eventEndDay) || !(viewStartDt.plus({ days: dayIdx + 1 }) >= eventStartDay && viewStartDt.plus({ days: dayIdx + 1 }) <= eventEndDay)) {
+              const targetAllDaySlot = allDaySlotsContainer.children[segmentStartIndex + 1];
               if (!targetAllDaySlot) continue;
 
               const segmentDiv = document.createElement("div");
@@ -388,21 +389,17 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
               segmentDiv.dataset.level = level;
 
               const numDaysInSegment = dayIdx - segmentStartIndex + 1;
-              // Width calculation relative to the slot it's appended to.
-              // The slot itself is 1/7th of the total width.
-              // So, width should be numDaysInSegment * slotWidth.
-              // CSS: left is relative to the first slot of the segment.
-              const slotWidth = targetAllDaySlot.offsetWidth; // Get width of one day slot
-              // This assumes allDaySlotsContainer.children[segmentStartIndex+1] is the correct slot to measure.
-              // For multi-day, left needs to be 0 IF segmentStartIndex corresponds to targetAllDaySlot's day.
-              // More robust: position relative to allDayRow, calculate left based on segmentStartIndex * slot_width.
-              segmentDiv.style.width = `calc(${numDaysInSegment * 100}% - 4px)`; // Width relative to its parent slot if 1 day, or span multiple
-              segmentDiv.style.left = "2px"; // Default left within its slot
-              if (numDaysInSegment > 1) {
-                // For multi-day segments, the div is appended to the *first* slot cell of the segment.
-                // Its width should span N slots.
-                segmentDiv.style.width = `calc(${numDaysInSegment * targetAllDaySlot.offsetWidth}px - 4px)`;
+              const slotWidth = targetAllDaySlot.offsetWidth;
+
+              if (numDaysInView === 1) {
+                segmentDiv.style.width = `calc(100% - 4px)`;
+              } else if (numDaysInSegment > 1) {
+                segmentDiv.style.width = `calc(${numDaysInSegment * slotWidth}px - 4px)`;
+              } else {
+                // numDaysInSegment === 1 (for week view)
+                segmentDiv.style.width = `calc(100% - 4px)`;
               }
+              segmentDiv.style.left = "2px";
 
               segmentDiv.dataset.eventId = event.id;
               segmentDiv.setAttribute("draggable", "true");
@@ -413,38 +410,37 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
                 });
               }
               targetAllDaySlot.appendChild(segmentDiv);
-              segmentStartIndex = -1; // Reset for next segment of the same event if it breaks weeks
+              segmentStartIndex = -1;
             }
           }
         }
         placed = true;
-        break; // Event placed
+        break;
       }
     }
     if (!placed) {
-      // Could not be placed in visible levels
-      for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-        const currentDayInGrid = startOfWeekDt.plus({ days: dayIdx });
+      for (let dayIdx = 0; dayIdx < numDaysInView; dayIdx++) {
+        const currentDayInGrid = viewStartDt.plus({ days: dayIdx });
         if (currentDayInGrid >= eventStartDay && currentDayInGrid <= eventEndDay) {
           hiddenAllDayCounts[dayIdx]++;
         }
       }
     }
   });
-  // Render "+N more" boxes for all-day events
+
   hiddenAllDayCounts.forEach((count, dayIdx) => {
     if (count > 0) {
-      const targetAllDaySlot = allDaySlotsContainer.children[dayIdx + 1]; // +1 to skip label cell
+      const targetAllDaySlot = allDaySlotsContainer.children[dayIdx + 1];
       if (!targetAllDaySlot) return;
       const moreBox = document.createElement("div");
       moreBox.className = "event-count-box all-day-more";
       moreBox.textContent = `+${count}`;
       moreBox.style.top = `${MAX_ALL_DAY_LEVELS * (ALL_DAY_EVENT_HEIGHT_PX + ALL_DAY_VERTICAL_SPACING_PX)}px`;
-      moreBox.style.right = `2px`; // Position to the right of the slot
+      moreBox.style.right = `2px`;
       if (typeof openModal === "function") {
         moreBox.addEventListener("click", (e) => {
           e.stopPropagation();
-          openModal("list", startOfWeekDt.plus({ days: dayIdx }).toFormat("yyyy-MM-dd"));
+          openModal("list", viewStartDt.plus({ days: dayIdx }).toFormat("yyyy-MM-dd"));
         });
       }
       targetAllDaySlot.appendChild(moreBox);
@@ -452,12 +448,11 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
   });
 
   // --- Timed Events Rendering (Improved Collision/Layout) ---
-  const timedEvents = eventsInWeek.filter((e) => !e._isAllDay);
-  dayColumns.forEach((dayColumn, dayIndexInWeek) => {
-    const currentDayDt = startOfWeekDt.plus({ days: dayIndexInWeek });
+  const timedEvents = eventsInView.filter((e) => !e._isAllDay);
+  dayColumns.forEach((dayColumn, dayIndexInView) => {
+    const currentDayDt = viewStartDt.plus({ days: dayIndexInView });
     const dayStr = currentDayDt.toFormat("yyyy-MM-dd");
 
-    // Get event segments for *this specific day*
     const dailySegments = [];
     timedEvents.forEach((event) => {
       const startDisp = event._startDt.setZone(viewConfig.displayZone);
@@ -467,79 +462,58 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
       const segmentEndOnDay = luxon.DateTime.min(endDisp, currentDayDt.endOf("day"));
 
       if (segmentStartOnDay < segmentEndOnDay) {
-        // Ensure positive duration on this day
         dailySegments.push({
           id: event.id,
           name: event.name,
           color: event.color,
-          start: segmentStartOnDay, // Luxon DateTime in displayZone
-          end: segmentEndOnDay, // Luxon DateTime in displayZone
-          originalEvent: event, // Keep ref to full event for modal click
+          start: segmentStartOnDay,
+          end: segmentEndOnDay,
+          originalEvent: event,
         });
       }
     });
 
     if (dailySegments.length === 0) return;
 
-    // Create event points (start and end of each segment on this day)
     const eventPoints = [];
     dailySegments.forEach((seg) => {
       eventPoints.push({ time: seg.start, type: "start", segment: seg });
       eventPoints.push({ time: seg.end, type: "end", segment: seg });
     });
 
-    // Sort points: by time, then 'end' before 'start' to free up columns
     eventPoints.sort((a, b) => {
       if (a.time < b.time) return -1;
       if (a.time > b.time) return 1;
-      return a.type === "end" ? -1 : 1; // 'end' types first
+      return a.type === "end" ? -1 : 1;
     });
 
-    const activeSegments = []; // Segments currently being laid out
-    const columnAssignments = new Map(); // event.id -> { columnIndex, numParallel }
+    const activeSegments = [];
+    const columnAssignments = new Map();
     let maxColumnsUsedThisDay = 0;
-
-    // Sweep line
-    const columnEndTimes = []; // Stores the end time of the last segment in each column
+    const columnEndTimes = [];
 
     for (const point of eventPoints) {
       if (point.type === "start") {
         let assignedColumn = -1;
-        // Find first available column
         for (let i = 0; i < columnEndTimes.length; i++) {
           if (!columnEndTimes[i] || columnEndTimes[i] <= point.segment.start) {
-            // Column is free or last event ended
             assignedColumn = i;
             break;
           }
         }
         if (assignedColumn === -1) {
-          // Need a new column
           assignedColumn = columnEndTimes.length;
-          columnEndTimes.push(null); // Add new column placeholder
+          columnEndTimes.push(null);
         }
         columnEndTimes[assignedColumn] = point.segment.end;
         activeSegments.push({ ...point.segment, columnIndex: assignedColumn });
-        // maxColumnsUsedThisDay = Math.max(maxColumnsUsedThisDay, activeSegments.length); // Max concurrent during this segment's start
-
-        // Store layout info (simple version: all events get width based on max columns seen so far)
-        columnAssignments.set(point.segment.id, { columnIndex: assignedColumn, numParallelProxy: 0 }); // numParallelProxy will be updated
+        columnAssignments.set(point.segment.id, { columnIndex: assignedColumn, numParallelProxy: 0 });
       } else {
-        // point.type === 'end'
-        const index = activeSegments.findIndex((s) => s.id === point.segment.id && s.columnIndex !== undefined); // Ensure it was an active segment
+        const index = activeSegments.findIndex((s) => s.id === point.segment.id && s.columnIndex !== undefined);
         if (index > -1) {
-          // Mark the column as free up to this point's time if this was the last event in it
-          const endedSegment = activeSegments[index];
-          if (columnEndTimes[endedSegment.columnIndex] && columnEndTimes[endedSegment.columnIndex].equals(endedSegment.end)) {
-            // To correctly free a column, we need to know if other events still occupy it *later*.
-            // A simpler way: just remove from active. The next 'start' event will find a free slot.
-            // columnEndTimes[endedSegment.columnIndex] = null; // Or point.segment.start to allow reuse from this time
-          }
           activeSegments.splice(index, 1);
         }
       }
-      // Update numParallelProxy for all currently active segments
-      // This calculates how many events are truly parallel at this point in time for each active event.
       activeSegments.forEach((actSeg) => {
         let currentOverlapCount = 0;
         for (const otherActSeg of activeSegments) {
@@ -552,21 +526,17 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
       });
     }
 
-    // Final pass to ensure all events that were active get numParallel based on overall max for the day if their own proxy is smaller
-    // This creates a more uniform column division look for the day.
     let overallMaxParallel = 1;
     columnAssignments.forEach((val) => {
       overallMaxParallel = Math.max(overallMaxParallel, val.numParallelProxy);
     });
     columnAssignments.forEach((val) => {
-      val.numParallel = overallMaxParallel > 0 ? overallMaxParallel : 1; // Ensure at least 1
+      val.numParallel = overallMaxParallel > 0 ? overallMaxParallel : 1;
     });
 
-    // Render the segments
     dailySegments.forEach((segment) => {
       const layout = columnAssignments.get(segment.id);
       if (!layout) {
-        // console.warn("No layout found for segment", segment.id, "on day", dayStr);
         return;
       }
 
@@ -580,13 +550,12 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
       eventBlock.className = "week-event-block";
       eventBlock.style.backgroundColor = segment.color || "#3b82f6";
       eventBlock.style.top = `${top}px`;
-      eventBlock.style.height = `${Math.max(height - 2, 15)}px`; // Min height, and 2px for border/margin
+      eventBlock.style.height = `${Math.max(height - 2, 15)}px`;
 
       const colWidthPercent = 100 / layout.numParallel;
-      eventBlock.style.width = `calc(${colWidthPercent}% - 4px)`; // 4px for L/R margin
-      eventBlock.style.left = `calc(${layout.columnIndex * colWidthPercent}% + 2px)`; // 2px L margin
-
-      eventBlock.dataset.eventId = segment.id; // Use full event ID
+      eventBlock.style.width = `calc(${colWidthPercent}% - 4px)`;
+      eventBlock.style.left = `calc(${layout.columnIndex * colWidthPercent}% + 2px)`;
+      eventBlock.dataset.eventId = segment.id;
 
       const nameSpan = document.createElement("span");
       nameSpan.className = "week-event-name";
@@ -594,10 +563,8 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
       eventBlock.appendChild(nameSpan);
 
       if (height > 25) {
-        // Show time if block is tall enough
         const timeSpan = document.createElement("span");
         timeSpan.className = "week-event-time";
-        // Show original event times, not just segment times for the day
         const originalStartDisp = segment.originalEvent._startDt.setZone(viewConfig.displayZone);
         const originalEndDisp = segment.originalEvent._endDt.setZone(viewConfig.displayZone);
         timeSpan.textContent = `${originalStartDisp.toFormat("HH:mm")} - ${originalEndDisp.toFormat("HH:mm")}`;
@@ -608,7 +575,7 @@ function renderWeekViewEvents(eventsToRender, viewConfig, dayColumnElements) {
       if (typeof openModal === "function") {
         eventBlock.addEventListener("click", (e) => {
           e.stopPropagation();
-          openModal("form", segment.id); // Open modal for the original event
+          openModal("form", segment.id);
         });
       }
       dayColumn.appendChild(eventBlock);
@@ -649,20 +616,16 @@ function renderEventVisuals(...args) {
         return null;
       }
     })
-    .filter(Boolean) // Remove nulls from mapping invalid events
+    .filter(Boolean)
     .sort((a, b) => {
-      // Sort primarily by start time, then by duration (longer events first for some layout heuristics)
       const timeA = a._startDt.toMillis();
       const timeB = b._startDt.toMillis();
       if (timeA !== timeB) return timeA - timeB;
-      // If start times are same, sort all-day events first, then by duration (longer first)
       if (a._isAllDay && !b._isAllDay) return -1;
       if (!a._isAllDay && b._isAllDay) return 1;
       return b._endDt.toMillis() - b._startDt.toMillis() - (a._endDt.toMillis() - a._startDt.toMillis());
     });
 
-  // Attach processed Luxon dates back to original customEvents array for access elsewhere (e.g. resizer collision check)
-  // This assumes IDs are unique and present.
   processedEvents.forEach((pEvent) => {
     const originalEvent = customEvents.find((ce) => ce.id === pEvent.id);
     if (originalEvent) {
@@ -680,28 +643,27 @@ function renderEventVisuals(...args) {
 
   const viewConfig = {
     displayZone: appDisplayTimezone,
-    overlayHeight: currentView === "year" ? 5 : currentView === "month" ? 18 : 18, // Week all-day uses similar height to month
-    verticalSpacing: currentView === "year" ? 1 : currentView === "month" ? 3 : 2, // Week all-day similar spacing
+    overlayHeight: currentView === "year" ? 5 : currentView === "month" || currentView === "day" ? 18 : 18,
+    verticalSpacing: currentView === "year" ? 1 : currentView === "month" || currentView === "day" ? 3 : 2,
     countBoxHeight: currentView === "year" ? 12 : 20,
-    maxPlacementLevels: currentView === "year" ? 3 : 3, // Max event lines before "+N"
-    hourHeightPx: 40, // For week view timed events
+    maxPlacementLevels: currentView === "year" ? 3 : 3,
+    hourHeightPx: 40,
   };
 
   if (currentView === "year" || currentView === "month") {
     viewConfig.viewName = currentView;
     renderMonthYearViewEvents(processedEvents, viewConfig);
-  } else if (currentView === "week") {
-    viewConfig.viewName = "week";
-    const weekDayColumns = args[0]; // Passed from updateCalendar
-    if (weekDayColumns && weekDayColumns.length === 7) {
-      renderWeekViewEvents(processedEvents, viewConfig, weekDayColumns);
+  } else if (currentView === "week" || currentView === "day") {
+    viewConfig.viewName = currentView;
+    const dayColumns = args[0];
+    if (dayColumns && dayColumns.length > 0) {
+      renderWeekViewEvents(processedEvents, viewConfig, dayColumns);
     } else {
-      // Fallback to query if not passed, though ideally it should be passed
       const queriedColumns = Array.from(calendarContainer.querySelectorAll(".week-day-column"));
-      if (queriedColumns.length === 7) {
+      if (queriedColumns.length > 0) {
         renderWeekViewEvents(processedEvents, viewConfig, queriedColumns);
       } else {
-        console.error("renderEventVisuals: Week view columns not available for rendering.");
+        console.error("renderEventVisuals: Week/Day view columns not available for rendering.");
       }
     }
   }

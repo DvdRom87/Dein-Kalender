@@ -167,7 +167,7 @@ function generateYearView(year) {
       grid.addEventListener("mouseout", handleGridMouseOut);
     }
   });
-  return null; // Explicitly return null as it doesn't produce specific column elements for renderer
+  return null;
 }
 
 function generateMonthView(year, monthIndex) {
@@ -185,45 +185,42 @@ function generateMonthView(year, monthIndex) {
     grid.addEventListener("mouseover", handleGridMouseOver);
     grid.addEventListener("mouseout", handleGridMouseOut);
   }
-  return null; // Explicitly return null
+  return null;
 }
 
-function generateWeekView(year, monthIndex, day) {
+function _generateTimedViewDOM(viewStartDate, numDaysToDisplay, mainContainerClass) {
   calendarContainer.innerHTML = "";
-  calendarContainer.className = "calendar-container week-view";
-  monthCardGeometryCaches.clear(); // Clear month/year specific cache
+  calendarContainer.className = `calendar-container ${mainContainerClass}`;
+  window.clearCalendarGeometryCache(true);
 
-  let localWeekViewDayColumnElements = []; // Use a local variable
-
+  let localDayColumnElements = [];
   const todayDt = luxon.DateTime.now().setZone(appDisplayTimezone).startOf("day");
-  const currentDayDt = luxon.DateTime.local(year, monthIndex + 1, day, { zone: appDisplayTimezone });
-  const startOfWeek = currentDayDt.startOf("week");
-  const endOfWeek = currentDayDt.endOf("week");
 
-  const weekGridContainer = document.createElement("div");
-  weekGridContainer.className = "week-grid-scroll-container";
-  const weekGrid = document.createElement("div");
-  weekGrid.className = "week-grid-content";
+  const gridContainer = document.createElement("div");
+  gridContainer.className = "week-grid-scroll-container";
+  const gridContent = document.createElement("div");
+  gridContent.className = "week-grid-content";
 
   const headerRow = document.createElement("div");
   headerRow.className = "week-header-row";
   const timeGutterCorner = document.createElement("div");
   timeGutterCorner.className = "time-axis-gutter week-header-corner";
-  timeGutterCorner.textContent = `KW ${startOfWeek.weekNumber}`;
+  timeGutterCorner.textContent = `KW ${viewStartDate.weekNumber}`;
   headerRow.appendChild(timeGutterCorner);
 
-  for (let i = 0; i < 7; i++) {
-    const dayInWeek = startOfWeek.plus({ days: i });
+  for (let i = 0; i < numDaysToDisplay; i++) {
+    const dayInView = viewStartDate.plus({ days: i });
     const dayHeader = document.createElement("div");
     dayHeader.className = "week-day-header";
-    dayHeader.dataset.date = dayInWeek.toFormat("yyyy-MM-dd");
-    dayHeader.innerHTML = `<span class="day-name-short">${GERMAN_DAY_NAMES_SHORT[i]}</span> <span class="day-date-num">${dayInWeek.toFormat("dd.MM.")}</span>`;
-    if (dayInWeek.hasSame(todayDt, "day")) dayHeader.classList.add("today");
-    if (dayInWeek.weekday === 6 || dayInWeek.weekday === 7) dayHeader.classList.add("weekend");
+    dayHeader.dataset.date = dayInView.toFormat("yyyy-MM-dd");
+    const dayNameShort = GERMAN_DAY_NAMES_SHORT[dayInView.weekday - 1] || GERMAN_DAY_NAMES_SHORT[6];
+    dayHeader.innerHTML = `<span class="day-name-short">${dayNameShort}</span> <span class="day-date-num">${dayInView.toFormat("dd.MM.")}</span>`;
+    if (dayInView.hasSame(todayDt, "day")) dayHeader.classList.add("today");
+    if (dayInView.weekday === 6 || dayInView.weekday === 7) dayHeader.classList.add("weekend");
     if (typeof handleDayClick === "function") dayHeader.addEventListener("click", handleDayClick);
     headerRow.appendChild(dayHeader);
   }
-  weekGrid.appendChild(headerRow);
+  gridContent.appendChild(headerRow);
 
   const allDayRow = document.createElement("div");
   allDayRow.className = "week-all-day-row";
@@ -232,17 +229,17 @@ function generateWeekView(year, monthIndex, day) {
   allDayLabelCell.textContent = "Ganztägig";
   allDayRow.appendChild(allDayLabelCell);
 
-  for (let i = 0; i < 7; i++) {
-    const dayInWeek = startOfWeek.plus({ days: i });
+  for (let i = 0; i < numDaysToDisplay; i++) {
+    const dayInView = viewStartDate.plus({ days: i });
     const allDayCell = document.createElement("div");
     allDayCell.className = "week-all-day-slot";
-    allDayCell.dataset.date = dayInWeek.toFormat("yyyy-MM-dd");
-    if (dayInWeek.weekday === 6 || dayInWeek.weekday === 7) allDayCell.classList.add("weekend");
-    if (dayInWeek.hasSame(todayDt, "day")) allDayCell.classList.add("today");
+    allDayCell.dataset.date = dayInView.toFormat("yyyy-MM-dd");
+    if (dayInView.weekday === 6 || dayInView.weekday === 7) allDayCell.classList.add("weekend");
+    if (dayInView.hasSame(todayDt, "day")) allDayCell.classList.add("today");
     if (typeof handleDayClick === "function") allDayCell.addEventListener("click", handleDayClick);
     allDayRow.appendChild(allDayCell);
   }
-  weekGrid.appendChild(allDayRow);
+  gridContent.appendChild(allDayRow);
 
   const mainContentRow = document.createElement("div");
   mainContentRow.className = "week-main-content-row";
@@ -260,19 +257,19 @@ function generateWeekView(year, monthIndex, day) {
   const daysContainer = document.createElement("div");
   daysContainer.className = "week-days-container";
 
-  for (let i = 0; i < 7; i++) {
-    const dayInWeek = startOfWeek.plus({ days: i });
+  for (let i = 0; i < numDaysToDisplay; i++) {
+    const dayInView = viewStartDate.plus({ days: i });
     const dayColumn = document.createElement("div");
     dayColumn.className = "week-day-column";
-    dayColumn.dataset.date = dayInWeek.toFormat("yyyy-MM-dd");
-    if (dayInWeek.hasSame(todayDt, "day")) dayColumn.classList.add("today");
-    if (dayInWeek.weekday === 6 || dayInWeek.weekday === 7) dayColumn.classList.add("weekend");
+    dayColumn.dataset.date = dayInView.toFormat("yyyy-MM-dd");
+    if (dayInView.hasSame(todayDt, "day")) dayColumn.classList.add("today");
+    if (dayInView.weekday === 6 || dayInView.weekday === 7) dayColumn.classList.add("weekend");
 
     for (let hour = 0; hour < 24; hour++) {
       const hourSlot = document.createElement("div");
       hourSlot.className = "hour-slot";
       hourSlot.dataset.time = `${String(hour).padStart(2, "0")}:00`;
-      hourSlot.dataset.date = dayInWeek.toFormat("yyyy-MM-dd");
+      hourSlot.dataset.date = dayInView.toFormat("yyyy-MM-dd");
       if (typeof handleDayClick === "function") {
         hourSlot.addEventListener("click", (e) => {
           const targetSlot = e.currentTarget;
@@ -284,70 +281,29 @@ function generateWeekView(year, monthIndex, day) {
       dayColumn.appendChild(hourSlot);
     }
     daysContainer.appendChild(dayColumn);
-    localWeekViewDayColumnElements.push(dayColumn); // Populate local array
+    localDayColumnElements.push(dayColumn);
   }
   mainContentRow.appendChild(daysContainer);
-  weekGrid.appendChild(mainContentRow);
-  weekGridContainer.appendChild(weekGrid);
-  calendarContainer.appendChild(weekGridContainer);
+  gridContent.appendChild(mainContentRow);
+  gridContainer.appendChild(gridContent);
+  calendarContainer.appendChild(gridContainer);
 
-  currentViewTitle.textContent = `KW ${startOfWeek.weekNumber}: ${startOfWeek.toFormat("dd.MM.")} - ${endOfWeek.toFormat("dd.MM.yyyy")}`;
-  return localWeekViewDayColumnElements; // Return the populated elements
+  return localDayColumnElements;
+}
+
+function generateWeekView(year, monthIndex, day) {
+  const currentDayDt = luxon.DateTime.local(year, monthIndex + 1, day, { zone: appDisplayTimezone });
+  const startOfWeek = currentDayDt.startOf("week");
+  return _generateTimedViewDOM(startOfWeek, 7, "week-view");
 }
 
 function generateDayView(year, monthIndex, day) {
-  calendarContainer.innerHTML = "";
-  calendarContainer.className = "calendar-container day-view";
-  window.clearCalendarGeometryCache(true);
-  const title = document.createElement("h2");
-  title.classList.add("day-title");
-  title.textContent = `${day}. ${GERMAN_MONTH_NAMES[monthIndex]} ${year}`;
-  calendarContainer.appendChild(title);
-  const dateStr = luxon.DateTime.local(year, monthIndex + 1, day, { zone: appDisplayTimezone }).toFormat("yyyy-MM-dd");
-  const eventsForDay = typeof getEventsForDate === "function" ? getEventsForDate(dateStr) : [];
-  const listEl = document.createElement("ul");
-  listEl.classList.add("event-list");
-  if (eventsForDay.length > 0) {
-    eventsForDay.sort((a, b) => (a.start_utc ? luxon.DateTime.fromISO(a.start_utc).toMillis() : luxon.DateTime.fromISO(a.start, { zone: appDisplayTimezone }).startOf("day").toMillis()) - (b.start_utc ? luxon.DateTime.fromISO(b.start_utc).toMillis() : luxon.DateTime.fromISO(b.start, { zone: appDisplayTimezone }).startOf("day").toMillis()));
-    const frag = document.createDocumentFragment();
-    eventsForDay.forEach((event) => {
-      const li = document.createElement("li");
-      li.dataset.eventId = event.id;
-      const isAllDay = !event.start_utc;
-      const fmtDateTime = typeof DateUtils !== "undefined" && typeof DateUtils.formatDateTimeRange === "function" ? DateUtils.formatDateTimeRange(event, isAllDay, appDisplayTimezone) : `${event.start} - ${event.end}`;
-
-      // Escape the event name for safety
-      const eventNameDisplay = event.name ? DateUtils.escapeIcsField(event.name) : "Unbenanntes Ereignis";
-
-      let descriptionHtml = "";
-      if (event.description) {
-        // Use HtmlUtils
-        descriptionHtml = HtmlUtils.sanitizeHtml(event.description);
-      }
-
-      li.innerHTML = `
-        <span class="event-color-dot" style="background-color: ${event.color || "#3b82f6"};"></span>
-        <div class="event-details">
-          <strong>${eventNameDisplay}</strong>
-          <span>${fmtDateTime}</span>
-          ${descriptionHtml ? `<div class="event-description-html-content">${descriptionHtml}</div>` : ""}
-        </div>`;
-      if (typeof openModal === "function") li.addEventListener("click", () => openModal("form", event.id));
-      frag.appendChild(li);
-    });
-    listEl.appendChild(frag);
-  } else {
-    const msg = document.createElement("p");
-    msg.classList.add("no-events-message");
-    msg.textContent = "Keine Ereignisse an diesem Tag.";
-    listEl.appendChild(msg);
-  }
-  calendarContainer.appendChild(listEl);
-  return null;
+  const currentDayDt = luxon.DateTime.local(year, monthIndex + 1, day, { zone: appDisplayTimezone });
+  return _generateTimedViewDOM(currentDayDt, 1, "day-view");
 }
 
 function applyStaticDayStyling(publicHolidays, schoolHolidays) {
-  const dayElementsSelector = currentView === "week" ? ".week-day-header[data-date], .week-day-column[data-date], .week-all-day-slot[data-date]" : ".day[data-date]";
+  const dayElementsSelector = currentView === "week" || currentView === "day" ? ".week-day-header[data-date], .week-day-column[data-date], .week-all-day-slot[data-date]" : ".day[data-date]";
 
   document.querySelectorAll(dayElementsSelector).forEach((dayEl) => {
     dayEl.classList.remove("holiday", "school-holiday");
@@ -458,19 +414,18 @@ async function updateCalendar(forceFullRedraw = false) {
   const structChange = forceFullRedraw || dateChanged;
   navigationButtons.style.display = currentView === "year" ? "none" : "flex";
 
-  let generatedViewElements = null; // To hold elements returned by generate...View funcs
+  let generatedViewElements = null;
 
   if (structChange) {
     window.clearCalendarGeometryCache(previousView !== currentView);
     if (currentView === "year") generateYearView(currentYear);
     else if (currentView === "month") generateMonthView(currentYear, currentMonth);
     else if (currentView === "week") generatedViewElements = generateWeekView(currentYear, currentMonth, currentDay);
-    else if (currentView === "day") generateDayView(currentYear, currentMonth, currentDay);
-  } else if (currentView === "week") {
+    else if (currentView === "day") generatedViewElements = generateDayView(currentYear, currentMonth, currentDay);
+  } else if (currentView === "week" || currentView === "day") {
     generatedViewElements = Array.from(calendarContainer.querySelectorAll(".week-day-column"));
   }
 
-  // Update Title
   if (currentView === "year") currentViewTitle.textContent = `${currentYear}`;
   else if (currentView === "month") currentViewTitle.textContent = `${GERMAN_MONTH_NAMES[currentMonth]} ${currentYear}`;
   else if (currentView === "week") {
@@ -479,12 +434,6 @@ async function updateCalendar(forceFullRedraw = false) {
     const endOfWeek = dtForWeekTitle.endOf("week");
     currentViewTitle.textContent = `KW ${startOfWeek.weekNumber}: ${startOfWeek.toFormat("dd.MM.")} - ${endOfWeek.toFormat("dd.MM.yyyy")}`;
   } else currentViewTitle.textContent = `${currentDay}. ${GERMAN_MONTH_NAMES[currentMonth]} ${currentYear}`;
-
-  if (currentView === "day") {
-    if (typeof clearEventOverlaysAndCountBoxes === "function") clearEventOverlaysAndCountBoxes();
-    stateSelect.dataset.prevState = stateVal;
-    return;
-  }
 
   const stateChanged = stateSelect.dataset.prevState !== stateVal;
   let yearForHolidayFetch = currentYear;
@@ -498,15 +447,10 @@ async function updateCalendar(forceFullRedraw = false) {
       relevantYearsForSchoolHolidays = [currentWeekStart.year, currentWeekEnd.year];
     }
   } else if (currentView === "month") {
-    // For school holidays, fetch previous year if current month is Jan, next year if Dec
-    // to catch holidays spanning year boundaries (e.g. Christmas break)
-    // Luxon month is 1-indexed. newDtForContext.month gives 1 for Jan, 12 for Dec.
     if (newDtForContext.month === 1) {
-      // January
       relevantYearsForSchoolHolidays.push(currentYear - 1);
     }
     if (newDtForContext.month === 12) {
-      // December
       relevantYearsForSchoolHolidays.push(currentYear + 1);
     }
   }
@@ -542,7 +486,7 @@ async function updateCalendar(forceFullRedraw = false) {
     stateSelect.dataset.prevState = stateVal;
   }
 
-  const renderArgs = currentView === "week" && generatedViewElements ? [generatedViewElements] : [];
+  const renderArgs = (currentView === "week" || currentView === "day") && generatedViewElements && generatedViewElements.length > 0 ? [generatedViewElements] : [];
 
   if (typeof renderEventVisuals === "function") {
     Promise.resolve().then(() => {

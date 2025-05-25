@@ -12,22 +12,26 @@ const { DateTime, Duration } = luxon;
 const IGNORE_POINTER_CLASS = "ignore-pointer-during-drag";
 const DRAG_OVER_CLASS = "drag-over";
 const IS_DRAGGING_CLASS = "is-dragging-active";
-const EVENT_OVERLAY_CLASS = "event-overlay"; // For Month/Year view segments
-const WEEK_EVENT_BLOCK_CLASS = "week-event-block"; // For Week view timed events
-const WEEK_ALL_DAY_EVENT_SEGMENT_CLASS = "week-all-day-event-segment"; // For Week view all-day events
+const EVENT_OVERLAY_CLASS = "event-overlay";
+const WEEK_EVENT_BLOCK_CLASS = "week-event-block";
+const WEEK_ALL_DAY_EVENT_SEGMENT_CLASS = "week-all-day-event-segment";
 const DRAG_GHOST_CLASS = "drag-ghost";
+const DRAGGING_ORIGINAL_HIDDEN_CLASS = "dragging-original-hidden";
 
 function handleDragStart(event) {
   if (window.calendarInteractionState.isResizing) {
     event.preventDefault();
     return;
   }
-  if (!event.target.matches(`.${EVENT_OVERLAY_CLASS}, .${WEEK_EVENT_BLOCK_CLASS}, .${WEEK_ALL_DAY_EVENT_SEGMENT_CLASS}`)) {
+  const targetEventElement = event.target.closest(`.${EVENT_OVERLAY_CLASS}, .${WEEK_EVENT_BLOCK_CLASS}, .${WEEK_ALL_DAY_EVENT_SEGMENT_CLASS}`);
+  if (!targetEventElement) {
     return;
   }
 
-  draggedEventElement = event.target;
+  draggedEventElement = targetEventElement;
   const eventId = draggedEventElement.dataset.eventId;
+  if (!eventId) return;
+
   const sourceEvent = Array.isArray(customEvents) ? customEvents.find((e) => e.id === eventId) : null;
 
   if (!sourceEvent) {
@@ -66,43 +70,63 @@ function handleDragStart(event) {
   }
 
   document.querySelectorAll(`.${EVENT_OVERLAY_CLASS}, .${WEEK_EVENT_BLOCK_CLASS}, .${WEEK_ALL_DAY_EVENT_SEGMENT_CLASS}`).forEach((el) => {
-    if (el !== draggedEventElement) {
+    if (el.dataset.eventId !== eventId) {
       el.classList.add(IGNORE_POINTER_CLASS);
     }
   });
 
-  if (draggedEventElement) {
-    draggedEventElement.style.setProperty("opacity", "0.1", "important");
-  }
   document.body.classList.add(IS_DRAGGING_CLASS);
 
-  createAndSetDragGhost(event);
+  const ghostSucceeded = createAndSetDragGhost(event);
+
+  if (ghostSucceeded) {
+    requestAnimationFrame(() => {
+      document.querySelectorAll(`.${EVENT_OVERLAY_CLASS}[data-event-id="${eventId}"], ` + `.${WEEK_EVENT_BLOCK_CLASS}[data-event-id="${eventId}"], ` + `.${WEEK_ALL_DAY_EVENT_SEGMENT_CLASS}[data-event-id="${eventId}"]`).forEach((segment) => {
+        segment.classList.add(DRAGGING_ORIGINAL_HIDDEN_CLASS);
+      });
+    });
+  } else {
+    console.warn("Drag ghost creation failed, drag might not work as expected.");
+  }
 }
 
 function createAndSetDragGhost(event) {
-  if (!draggedEventElement) return;
-  try {
-    dragGhostElement = draggedEventElement.cloneNode(true);
-    dragGhostElement.style.opacity = "";
-    dragGhostElement.style.visibility = "";
-    dragGhostElement.style.pointerEvents = "none";
-    dragGhostElement.classList.remove("dragging", IGNORE_POINTER_CLASS);
-    dragGhostElement.classList.add(DRAG_GHOST_CLASS);
+  if (!draggedEventElement) return false;
 
-    Object.assign(dragGhostElement.style, {
-      position: "absolute",
-      top: "0px",
-      left: "-9999px",
-      zIndex: "99999",
-      width: `${draggedEventElement.offsetWidth}px`,
-      height: `${draggedEventElement.offsetHeight}px`,
-    });
-    document.body.appendChild(dragGhostElement);
+  dragGhostElement = draggedEventElement.cloneNode(true);
+
+  dragGhostElement.style.opacity = "";
+  dragGhostElement.style.visibility = "visible";
+  dragGhostElement.style.display = "";
+  dragGhostElement.style.pointerEvents = "none";
+
+  dragGhostElement.classList.remove(DRAGGING_ORIGINAL_HIDDEN_CLASS);
+  dragGhostElement.classList.remove(IGNORE_POINTER_CLASS);
+  dragGhostElement.classList.add(DRAG_GHOST_CLASS);
+
+  Object.assign(dragGhostElement.style, {
+    position: "absolute",
+    top: "-9999px",
+    left: "-9999px",
+    zIndex: "99999",
+    width: `${draggedEventElement.offsetWidth}px`,
+    height: `${draggedEventElement.offsetHeight}px`,
+  });
+
+  document.body.appendChild(dragGhostElement);
+
+  try {
     const rect = draggedEventElement.getBoundingClientRect();
-    event.dataTransfer.setDragImage(dragGhostElement, event.clientX - rect.left, event.clientY - rect.top);
+    const offsetX = event.clientX - rect.left;
+    const offsetY = event.clientY - rect.top;
+
+    event.dataTransfer.setDragImage(dragGhostElement, offsetX, offsetY);
+    return true;
   } catch (e) {
+    console.error("Error in setDragImage:", e);
     if (dragGhostElement) dragGhostElement.remove();
     dragGhostElement = null;
+    return false;
   }
 }
 
@@ -160,25 +184,23 @@ function handleDayDrop(event) {
     let dropIntentIsAllDay;
 
     if (isDroppedOnHourSlot) {
-      dropIntentIsAllDay = false; // Dropping on an hour slot means it's timed
+      dropIntentIsAllDay = false;
     } else if (isDroppedOnWeekAllDaySlot) {
-      dropIntentIsAllDay = true; // Dropping on week's all-day area means it's all-day
+      dropIntentIsAllDay = true;
     } else if (isDroppedOnMonthYearDayCell) {
-      // If dropped on a month/year day cell, it takes on the characteristic of the source event.
-      // If source was timed, it remains timed (but date changes).
-      // If source was all-day, it remains all-day.
       dropIntentIsAllDay = draggedEventData.isAllDay;
     } else {
-      // Should not happen with current target matching in dragEnter/dragOver
-      dropIntentIsAllDay = draggedEventData.isAllDay; // Fallback
+      dropIntentIsAllDay = draggedEventData.isAllDay;
     }
 
-    const newTime = dropTarget.dataset.time; // e.g., "09:00", only for .hour-slot
+    const newTime = dropTarget.dataset.time;
 
     updateEventDates(eventToMove, newDateCellString, newTime, dropIntentIsAllDay, draggedEventData.originalDuration);
 
     if (typeof saveEvents === "function") saveEvents();
-    if (typeof window.renderEventVisuals === "function") {
+    if (typeof window.updateCalendar === "function") {
+      window.updateCalendar();
+    } else if (typeof window.renderEventVisuals === "function") {
       requestAnimationFrame(window.renderEventVisuals);
     }
   }
@@ -187,20 +209,15 @@ function handleDayDrop(event) {
 
 function updateEventDates(eventToMove, newStartDateCellString, newStartTimeString, dropIntentIsAllDay, originalDuration) {
   const appDisplayTimezone = DateTime.local().zoneName;
-  // isOriginallyAllDay refers to the state of eventToMove *before* this update function modifies it.
-  // We use draggedEventData.isAllDay for the state of the event at the start of the drag operation.
   const wasSourceEventAllDay = draggedEventData.isAllDay;
 
   if (dropIntentIsAllDay) {
-    // Event will become (or stay) all-day.
     let durationDays;
     if (wasSourceEventAllDay) {
-      // If original was all-day, preserve its day-based duration
       const originalStartDt = DateTime.fromISO(eventToMove.start, { zone: appDisplayTimezone });
       const originalEndDt = DateTime.fromISO(eventToMove.end, { zone: appDisplayTimezone });
       durationDays = originalEndDt.diff(originalStartDt, "days").days;
     } else {
-      // If original was timed, new all-day event defaults to single day.
       durationDays = 0;
     }
 
@@ -216,9 +233,6 @@ function updateEventDates(eventToMove, newStartDateCellString, newStartTimeStrin
     delete eventToMove.startTimezone;
     delete eventToMove.endTimezone;
   } else {
-    // Event will become (or stay) timed.
-    // If newStartTimeString is provided (e.g., dropped on an hour slot), use it.
-    // Otherwise, preserve the event's original time.
     const [h, m] = newStartTimeString ? newStartTimeString.split(":").map(Number) : eventToMove.time ? eventToMove.time.split(":").map(Number) : [0, 0];
 
     const eventStartTimezone = eventToMove.startTimezone || appDisplayTimezone;
@@ -226,15 +240,13 @@ function updateEventDates(eventToMove, newStartDateCellString, newStartTimeStrin
 
     let newStartLocalDt = DateTime.fromISO(newStartDateCellString, { zone: eventStartTimezone }).set({ hour: h, minute: m });
 
-    let currentEventDuration = originalDuration; // Use the duration from the start of the drag.
+    let currentEventDuration = originalDuration;
     if (!currentEventDuration) {
-      // If originalDuration was null (e.g. source was all-day or had no duration)
-      currentEventDuration = Duration.fromObject({ hours: 1 }); // Default to 1 hour
+      currentEventDuration = Duration.fromObject({ hours: 1 });
     }
 
     const newStartUtcDt = newStartLocalDt.toUTC();
     const newEndUtcDt = newStartUtcDt.plus(currentEventDuration);
-
     const finalNewEndLocal = newEndUtcDt.setZone(eventEndTimezone);
 
     eventToMove.start = newStartLocalDt.toFormat("yyyy-MM-dd");
@@ -253,11 +265,18 @@ function handleDragEnd(event) {
 }
 
 function cleanupDragState() {
-  if (draggedEventElement) {
-    draggedEventElement.style.opacity = "";
-    draggedEventElement.style.visibility = "";
-    draggedEventElement.classList.remove("dragging");
+  // Use draggedEventData.eventId if draggedEventElement might be gone or null
+  const eventIdToUnhide = draggedEventData ? draggedEventData.eventId : null;
+
+  if (eventIdToUnhide) {
+    document.querySelectorAll(`.${EVENT_OVERLAY_CLASS}[data-event-id="${eventIdToUnhide}"], ` + `.${WEEK_EVENT_BLOCK_CLASS}[data-event-id="${eventIdToUnhide}"], ` + `.${WEEK_ALL_DAY_EVENT_SEGMENT_CLASS}[data-event-id="${eventIdToUnhide}"]`).forEach((segment) => {
+      segment.classList.remove(DRAGGING_ORIGINAL_HIDDEN_CLASS);
+    });
+  } else if (draggedEventElement) {
+    // Fallback if eventIdToUnhide is not available
+    draggedEventElement.classList.remove(DRAGGING_ORIGINAL_HIDDEN_CLASS);
   }
+
   if (currentDroppableTarget) {
     currentDroppableTarget.classList.remove(DRAG_OVER_CLASS);
   }
@@ -265,27 +284,24 @@ function cleanupDragState() {
     dragGhostElement.remove();
   }
   document.body.classList.remove(IS_DRAGGING_CLASS);
-  document.body.classList.remove("is-resizing-active");
+
   document.querySelectorAll(`.${IGNORE_POINTER_CLASS}`).forEach((overlay) => {
     overlay.classList.remove(IGNORE_POINTER_CLASS);
   });
+
   draggedEventElement = null;
   draggedEventData = null;
   currentDroppableTarget = null;
   dragGhostElement = null;
-  if (window.calendarInteractionState) {
-    window.calendarInteractionState.isResizing = false;
-  }
 }
 
 function addDragAndDropListeners() {
   const currentView = document.getElementById("view-select") ? document.getElementById("view-select").value : "month";
   let droppableElements;
 
-  if (currentView === "week") {
+  if (currentView === "week" || currentView === "day") {
     droppableElements = document.querySelectorAll(".week-all-day-slot[data-date], .hour-slot[data-date][data-time]");
   } else {
-    // year or month view
     droppableElements = document.querySelectorAll(".day:not(.empty-day)[data-date]");
   }
 

@@ -659,12 +659,9 @@ select:focus {
 }
 .time-axis-gutter {
   flex: 0 0 var(--width-time-axis-gutter);
-  padding: 5px;
   text-align: right;
   font-size: var(--font-size-sm);
   color: var(--color-text-muted);
-  border-right: 1px solid var(--color-border-grid);
-  box-sizing: border-box;
 }
 .week-header-corner {
   font-weight: bold;
@@ -736,7 +733,7 @@ select:focus {
   position: relative;
   cursor: pointer;
 }
-.hour-slot:last-child {
+.hour-slot:not(:has(+ .hour-slot)) {
   border-bottom: none;
 }
 .hour-slot:hover {
@@ -749,42 +746,14 @@ select:focus {
   margin: auto;
   background-color: var(--color-bg-lightest);
   border: 1px solid var(--color-border-grid);
-  padding: var(--spacing-lg);
 }
-.day-view .day-title {
-  font-size: var(--font-size-display);
-  font-weight: bold;
-  text-align: center;
-  margin-bottom: var(--spacing-lg);
-  color: var(--color-text-primary);
-}
+
 .event-color-dot {
   display: inline-block;
   width: 12px;
   height: 12px;
   border-radius: var(--border-radius-round);
   flex-shrink: 0;
-}
-.day-view .event-list > li .event-details strong {
-  display: block;
-  font-size: var(--font-size-xxl);
-  margin-bottom: var(--spacing-xs);
-  color: var(--color-text-primary);
-}
-.day-view .event-list > li .event-details span {
-  font-size: var(--font-size-lg);
-  color: var(--color-text-muted);
-  display: block;
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-  line-height: 1.4;
-}
-.day-view .no-events-message {
-  text-align: center;
-  color: var(--color-text-muted);
-  font-style: italic;
-  margin-top: var(--spacing-lg);
 }
 
 .event-overlay {
@@ -981,6 +950,12 @@ select:focus {
   pointer-events: none !important;
 }
 
+.event-overlay.dragging-original-hidden,
+.week-event-block.dragging-original-hidden,
+.week-all-day-event-segment.dragging-original-hidden {
+  display: none !important; /* This will remove it from layout and pointer events */
+}
+
 .resize-preview-segment {
   position: absolute;
   border-radius: 3px;
@@ -1166,4 +1141,14 @@ select:focus {
   .month-view .day {
     min-height: 50px;
   }
+}
+
+.day-view .week-grid-content {
+  min-width: 300px;
+}
+
+.day-view .week-day-header,
+.day-view .week-all-day-slot,
+.day-view .week-day-column {
+  flex: 1 1 100%;
 }
