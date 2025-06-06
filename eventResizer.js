@@ -11,11 +11,11 @@ let resizeInitialLevel = 0;
 let resizeCurrentViewAppZone = "UTC";
 let lastPreviewRecalculationTargetKey = null;
 
-// Cached values during a resize operation
 let activeResizeOperationCache = {
   currentView: null,
   daysContainer: null,
-  allDayColumns: [], // Will store {element, rect} for each day column
+  allDayColumns: [],
+  allDaySlotGeometries: new Map(),
 };
 
 const THROTTLE_LIMIT_MS = 100;
@@ -26,7 +26,71 @@ const PREVIEW_SEGMENT_CLASS = "resize-preview-segment";
 const WEEK_RESIZE_PREVIEW_CLASS = "week-resize-preview-block";
 const RESIZE_TARGET_HOVER_CLASS = "resize-target-hover";
 const COLLIDING_PREVIEW_CLASS = "colliding";
-const HOUR_HEIGHT_IN_WEEK_VIEW = 40; // Assuming this is defined or accessible, used by calendarGrid.js too
+const HOUR_HEIGHT_IN_WEEK_VIEW = 40;
+const TEMP_IGNORE_POINTER_CLASS = "temp-ignore-pointer";
+
+const previewElementPool = {
+  available: [],
+  maxElements: 30,
+};
+
+function getResizeViewConfig() {
+  return {
+    viewName: activeResizeOperationCache.currentView,
+    overlayHeight: activeResizeOperationCache.currentView === "year" ? 5 : 18,
+    verticalSpacing: activeResizeOperationCache.currentView === "year" ? 1 : activeResizeOperationCache.currentView === "month" ? 3 : 2,
+    maxPlacementLevels: 3,
+    displayZone: resizeCurrentViewAppZone,
+    hourHeightPx: HOUR_HEIGHT_IN_WEEK_VIEW,
+  };
+}
+
+function prepareEventForResize(eventData, viewConfig) {
+  const prepared = prepareLuxonDtsForPreview(eventData, viewConfig.displayZone);
+  return prepared;
+}
+
+function getPreviewElementFromPool() {
+  if (previewElementPool.available.length > 0) {
+    const el = previewElementPool.available.pop();
+    el.style.display = "";
+    return el;
+  }
+  const newEl = document.createElement("div");
+  return newEl;
+}
+
+function releasePreviewElementToPool(element) {
+  if (!element) return;
+  element.className = "";
+  element.style.cssText = "";
+  element.textContent = "";
+  element.removeAttribute("data-event-id");
+  element.style.display = "none";
+
+  while (element.firstChild) {
+    element.removeChild(element.firstChild);
+  }
+
+  if (previewElementPool.available.length < previewElementPool.maxElements) {
+    previewElementPool.available.push(element);
+  } else {
+    element.remove();
+  }
+}
+
+function releaseAllDrawnPreviewsToPool() {
+  document.querySelectorAll(`.${PREVIEW_SEGMENT_CLASS}, .${WEEK_RESIZE_PREVIEW_CLASS}`).forEach((el) => {
+    releasePreviewElementToPool(el);
+  });
+}
+
+function cacheSlotGeometries() {
+  activeResizeOperationCache.allDaySlotGeometries.clear();
+  document.querySelectorAll(".week-all-day-slot[data-date]").forEach((slot) => {
+    activeResizeOperationCache.allDaySlotGeometries.set(slot.dataset.date, { width: slot.offsetWidth, left: slot.offsetLeft });
+  });
+}
 
 function throttle(func, limit) {
   let timeoutId = null;
@@ -61,68 +125,75 @@ function throttle(func, limit) {
 }
 const throttledRenderPreview = throttle((data) => renderResizePreview(data), THROTTLE_LIMIT_MS);
 
+function getPointerCoordinates(event) {
+  return event.touches && event.touches.length > 0 ? event.touches[0] : event;
+}
+
 function clearResizePreview() {
-  document.querySelectorAll(`.${PREVIEW_SEGMENT_CLASS}, .${WEEK_RESIZE_PREVIEW_CLASS}`).forEach((el) => el.remove());
+  releaseAllDrawnPreviewsToPool();
+}
+
+function getVisualEndDate(startDt, endDt, isAllDay) {
+  if (isAllDay) return endDt.startOf("day");
+  return endDt.hour === 0 && !startDt.hasSame(endDt, "day") ? endDt.minus({ days: 1 }).startOf("day") : endDt.startOf("day");
 }
 
 function prepareLuxonDtsForPreview(eventDataForPreview, displayZone) {
   const previewCopy = JSON.parse(JSON.stringify(eventDataForPreview));
   previewCopy._isAllDay = !previewCopy.start_utc;
 
-  if (previewCopy._isAllDay) {
-    try {
+  try {
+    if (previewCopy._isAllDay) {
       previewCopy._startDt = luxon.DateTime.fromISO(previewCopy.start, { zone: displayZone }).startOf("day");
       previewCopy._endDt = luxon.DateTime.fromISO(previewCopy.end, { zone: displayZone }).endOf("day");
-    } catch (e) {
-      previewCopy._startDt = luxon.DateTime.invalid("Error parsing all-day start/end");
-      previewCopy._endDt = luxon.DateTime.invalid("Error parsing all-day start/end");
-    }
-  } else {
-    if (previewCopy.start_utc && previewCopy.end_utc) {
-      try {
+    } else {
+      if (previewCopy.start_utc && previewCopy.end_utc) {
         previewCopy._startDt = luxon.DateTime.fromISO(previewCopy.start_utc, { zone: "utc" });
         previewCopy._endDt = luxon.DateTime.fromISO(previewCopy.end_utc, { zone: "utc" });
-      } catch (e) {
-        previewCopy._startDt = luxon.DateTime.invalid("Error parsing UTC start/end");
-        previewCopy._endDt = luxon.DateTime.invalid("Error parsing UTC start/end");
-      }
-    } else {
-      try {
+      } else {
         const sTime = previewCopy.time || "00:00";
         const eTime = previewCopy.endTime || sTime;
         const sDate = previewCopy.start;
         const eDate = previewCopy.end || sDate;
         const sZone = previewCopy.startTimezone || displayZone;
         const eZone = previewCopy.endTimezone || displayZone;
-        const tempStart = luxon.DateTime.fromISO(sDate + "T" + sTime, { zone: sZone });
+
+        const tempStart = luxon.DateTime.fromISO(`${sDate}T${sTime}`, { zone: sZone });
         previewCopy._startDt = tempStart.isValid ? tempStart.toUTC() : luxon.DateTime.invalid("invalid start parts for preview fallback");
+
         let tempEnd;
         if (previewCopy.endTime || previewCopy.end) {
-          tempEnd = luxon.DateTime.fromISO(eDate + "T" + eTime, { zone: eZone });
+          tempEnd = luxon.DateTime.fromISO(`${eDate}T${eTime}`, { zone: eZone });
         } else if (tempStart.isValid) {
           tempEnd = tempStart.plus({ hours: 1 });
         } else {
           tempEnd = luxon.DateTime.invalid("cannot determine end due to invalid start");
         }
         previewCopy._endDt = tempEnd && tempEnd.isValid ? tempEnd.toUTC() : luxon.DateTime.invalid("invalid end parts for preview fallback");
-      } catch (e) {
-        previewCopy._startDt = luxon.DateTime.invalid("Error in timed fallback");
-        previewCopy._endDt = luxon.DateTime.invalid("Error in timed fallback");
       }
     }
-  }
-  if (!previewCopy._startDt || !previewCopy._startDt.isValid) previewCopy._startDt = luxon.DateTime.invalid("preview start invalid final check");
-  if (!previewCopy._endDt || !previewCopy._endDt.isValid) previewCopy._endDt = luxon.DateTime.invalid("preview end invalid final check");
-  if (previewCopy._startDt.isValid && previewCopy._endDt.isValid && previewCopy._endDt < previewCopy._startDt) {
-    previewCopy._endDt = previewCopy._startDt.plus({ hours: 1 }); // Ensure end is not before start
+    if (!previewCopy._startDt || !previewCopy._startDt.isValid) {
+      previewCopy._startDt = luxon.DateTime.invalid("preview start invalid final check");
+    }
+    if (!previewCopy._endDt || !previewCopy._endDt.isValid) {
+      previewCopy._endDt = luxon.DateTime.invalid("preview end invalid final check");
+    }
+    if (previewCopy._startDt.isValid && previewCopy._endDt.isValid && previewCopy._endDt < previewCopy._startDt) {
+      previewCopy._endDt = previewCopy._startDt.plus({ hours: 1 });
+    }
+  } catch (e) {
+    previewCopy._startDt = luxon.DateTime.invalid("Error in prepareLuxonDtsForPreview");
+    previewCopy._endDt = luxon.DateTime.invalid("Error in prepareLuxonDtsForPreview");
   }
   return previewCopy;
 }
+window.prepareLuxonDtsForPreview = prepareLuxonDtsForPreview;
 
 function _buildRenderedEventLevelsCache(currentView, resizedEventOriginalId, visibleContextElements) {
   const cache = new Map();
-  // Adjusted selector for all-day events in week/day view
-  const eventSelector = (currentView === "week" || currentView === "day") && originalResizedEvent && originalResizedEvent._isAllDay ? `.week-all-day-event-segment[data-event-id][data-level]` : currentView === "month" || currentView === "year" ? `.event-overlay[data-event-id][data-level]` : null; // Timed week/day events don't use this level cache in the same way
+  const isResizingThisEventAllDay = originalResizedEvent ? originalResizedEvent._isAllDay : false;
+
+  const eventSelector = (currentView === "week" || currentView === "day") && isResizingThisEventAllDay ? `.week-all-day-event-segment[data-event-id][data-level]` : currentView === "month" || currentView === "year" ? `.event-overlay[data-event-id][data-level]` : null;
 
   if (!eventSelector) return cache;
 
@@ -160,8 +231,11 @@ function _findLevelForPreviewSegment(previewSegmentData, otherCommittedEvents, r
         let otherVisualEnd = otherEvent._endDt.setZone(displayZone);
         if (otherEvent._isAllDay) otherVisualEnd = otherVisualEnd.startOf("day");
         else {
-          if (otherVisualEnd.hour === 0 && otherVisualEnd.minute === 0 && otherVisualEnd.second === 0 && !otherStart.hasSame(otherVisualEnd, "day")) otherVisualEnd = otherVisualEnd.minus({ days: 1 }).startOf("day");
-          else otherVisualEnd = otherVisualEnd.startOf("day");
+          if (otherVisualEnd.hour === 0 && otherVisualEnd.minute === 0 && otherVisualEnd.second === 0 && !otherStart.hasSame(otherVisualEnd, "day")) {
+            otherVisualEnd = otherVisualEnd.minus({ days: 1 }).startOf("day");
+          } else {
+            otherVisualEnd = otherVisualEnd.startOf("day");
+          }
         }
         if (otherVisualEnd < otherStart.startOf("day")) otherVisualEnd = otherStart.startOf("day");
 
@@ -196,6 +270,7 @@ function _findLevelForPreviewSegment(previewSegmentData, otherCommittedEvents, r
   }
   return maxLevels;
 }
+window._findLevelForPreviewSegment = _findLevelForPreviewSegment;
 
 function renderMonthYearResizePreview(previewEventData, viewConfigForPreview) {
   const eventDataWithLuxonDts = prepareLuxonDtsForPreview(previewEventData, viewConfigForPreview.displayZone);
@@ -204,10 +279,6 @@ function renderMonthYearResizePreview(previewEventData, viewConfigForPreview) {
   const overallEventVisualStart = eventDataWithLuxonDts._startDt.setZone(viewConfigForPreview.displayZone);
   let overallEventVisualEnd = eventDataWithLuxonDts._endDt.setZone(viewConfigForPreview.displayZone);
   if (eventDataWithLuxonDts._isAllDay) overallEventVisualEnd = overallEventVisualEnd.startOf("day");
-  else {
-    if (overallEventVisualEnd.hour === 0 && overallEventVisualEnd.minute === 0 && overallEventVisualEnd.second === 0 && !overallEventVisualStart.hasSame(overallEventVisualEnd, "day")) overallEventVisualEnd = overallEventVisualEnd.minus({ days: 1 }).startOf("day");
-    else overallEventVisualEnd = overallEventVisualEnd.startOf("day");
-  }
   if (overallEventVisualEnd < overallEventVisualStart.startOf("day")) overallEventVisualEnd = overallEventVisualStart.startOf("day");
 
   const fullOtherEventsCache = originalResizedEvent._otherEventsCache || [];
@@ -215,6 +286,7 @@ function renderMonthYearResizePreview(previewEventData, viewConfigForPreview) {
   let anySegmentHidden = false;
 
   document.querySelectorAll(".month-card").forEach((monthCard) => {
+    const overlaysFrag = document.createDocumentFragment();
     const calendarGrid = monthCard.querySelector(".calendar-grid");
     if (!calendarGrid) return;
     const dayElementsInCard = Array.from(calendarGrid.querySelectorAll(".day:not(.empty-day)[data-date]"));
@@ -259,105 +331,127 @@ function renderMonthYearResizePreview(previewEventData, viewConfigForPreview) {
       const previewSegmentDiv = createEventSegmentElement(eventDataWithLuxonDts, segmentStartDate, segmentEndDate, overallEventVisualEnd.startOf("day"), currentCardCellCache, startOffsetInGrid, segmentTargetLevel, viewConfigForPreview, true);
       if (previewSegmentDiv) {
         if (previewEventData._isOverallCollidingPreview || anySegmentHidden) previewSegmentDiv.classList.add(COLLIDING_PREVIEW_CLASS);
-        monthCard.appendChild(previewSegmentDiv);
+        overlaysFrag.appendChild(previewSegmentDiv);
       }
       currentProcessingDay = segmentEndDate.plus({ days: 1 });
     }
+    monthCard.appendChild(overlaysFrag);
   });
   if (previewEventData) previewEventData._isOverallCollidingPreview = anySegmentHidden;
 }
 
 function renderWeekDayViewResizePreview(previewEventData, viewConfigForPreview) {
-  // Renamed for clarity
   const eventData = prepareLuxonDtsForPreview(previewEventData, viewConfigForPreview.displayZone);
-  if (!eventData._startDt.isValid || !eventData._endDt.isValid) {
-    return;
-  }
+  if (!eventData._startDt.isValid || !eventData._endDt.isValid) return;
 
   const overallEventVisualStart = eventData._startDt.setZone(viewConfigForPreview.displayZone);
   let overallEventVisualEnd = eventData._endDt.setZone(viewConfigForPreview.displayZone);
-  if (eventData._isAllDay) overallEventVisualEnd = overallEventVisualEnd.startOf("day");
 
-  const dayColumnsData = activeResizeOperationCache.allDayColumns; // Use cached elements {element, rect}
-  if (!dayColumnsData || dayColumnsData.length === 0) {
-    // Fallback if cache somehow failed (should not happen if mousedown populates it)
-    const freshCols = Array.from(document.querySelectorAll(".week-day-column[data-date]"));
-    if (freshCols.length > 0) {
-      activeResizeOperationCache.allDayColumns = freshCols.map((col) => ({ element: col, rect: col.getBoundingClientRect() }));
-      dayColumnsData.splice(0, dayColumnsData.length, ...activeResizeOperationCache.allDayColumns); // Update local var if needed
-    } else {
-      return;
-    }
-  }
-  const viewStartDt = luxon.DateTime.fromISO(dayColumnsData[0].element.dataset.date, { zone: viewConfigForPreview.displayZone });
-  const numDaysInCurrentView = dayColumnsData.length;
+  const currentDayColumns = activeResizeOperationCache.allDayColumns;
+  if (!currentDayColumns || currentDayColumns.length === 0) return;
+
+  const viewStartDt = luxon.DateTime.fromISO(currentDayColumns[0].element.dataset.date, { zone: viewConfigForPreview.displayZone });
+  const numDaysInCurrentView = currentDayColumns.length;
 
   let isOverallColliding = previewEventData._isOverallCollidingPreview || false;
 
   if (eventData._isAllDay) {
-    const allDayRow = document.querySelector(".week-all-day-row");
+    const allDayRow = document.querySelector(`.${activeResizeOperationCache.currentView}-view .week-all-day-row`) || document.querySelector(".week-all-day-row");
     if (!allDayRow) return;
 
     const viewEndDt = viewStartDt.plus({ days: numDaysInCurrentView - 1 });
-    const weekSpecificOtherEvents = (originalResizedEvent._otherEventsCache || []).filter((e) => e._isAllDay && e._startDt.isValid && e._endDt.isValid && e._startDt.setZone(viewConfigForPreview.displayZone) < viewEndDt.endOf("day") && e._endDt.setZone(viewConfigForPreview.displayZone) >= viewStartDt.startOf("day"));
+    const weekSpecificOtherEvents = (originalResizedEvent._otherEventsCache || []).filter((e) => e._isAllDay && e._startDt.isValid && e._endDt.isValid && e.id !== eventData.id && e._startDt.setZone(viewConfigForPreview.displayZone) < viewEndDt.endOf("day") && e._endDt.setZone(viewConfigForPreview.displayZone) >= viewStartDt.startOf("day"));
+
     const renderedEventLevels = originalResizedEvent._renderedEventLevelsCache || new Map();
 
-    let currentProcessingDay = luxon.DateTime.max(overallEventVisualStart.startOf("day"), viewStartDt.startOf("day"));
-    const viewActualEndForEvent = luxon.DateTime.min(overallEventVisualEnd.startOf("day"), viewEndDt.startOf("day"));
+    let currentSegmentStartDay = luxon.DateTime.max(overallEventVisualStart.startOf("day"), viewStartDt.startOf("day"));
+    const currentSegmentEndDay = luxon.DateTime.min(overallEventVisualEnd.startOf("day"), viewEndDt.startOf("day"));
 
-    if (currentProcessingDay.isValid && viewActualEndForEvent.isValid && currentProcessingDay <= viewActualEndForEvent) {
-      const segmentStartDate = currentProcessingDay;
-      const segmentEndDate = viewActualEndForEvent;
+    if (currentSegmentStartDay.isValid && currentSegmentEndDay.isValid && currentSegmentStartDay <= currentSegmentEndDay) {
       const segmentDataForLevelFinding = {
-        segmentStartDt: segmentStartDate,
-        segmentEndDt: segmentEndDate,
+        segmentStartDt: currentSegmentStartDay,
+        segmentEndDt: currentSegmentEndDay,
         _isAllDay: true,
         id: eventData.id,
       };
+
       const segmentTargetLevel = _findLevelForPreviewSegment(segmentDataForLevelFinding, weekSpecificOtherEvents, renderedEventLevels, viewConfigForPreview);
+
       if (segmentTargetLevel >= viewConfigForPreview.maxPlacementLevels) isOverallColliding = true;
 
-      let segmentStartDayIndex = -1;
+      let segmentStartDayIndexInView = -1;
+      let segmentEndDayIndexInView = -1;
+
       for (let i = 0; i < numDaysInCurrentView; i++) {
-        const dayInGrid = viewStartDt.plus({ days: i });
-        if (dayInGrid >= segmentStartDate && dayInGrid <= segmentEndDate) {
-          if (segmentStartDayIndex === -1) segmentStartDayIndex = i;
-          // Check if this is the last day of the segment within the current view's span
-          if (i === numDaysInCurrentView - 1 || dayInGrid.equals(segmentEndDate)) {
-            const numDaysInDisplaySegment = i - segmentStartDayIndex + 1;
-            const firstSlotOfDisplaySegment = allDayRow.querySelector(`.week-all-day-slot[data-date="${viewStartDt.plus({ days: segmentStartDayIndex }).toFormat("yyyy-MM-dd")}"]`);
-            if (firstSlotOfDisplaySegment) {
-              const previewBlock = document.createElement("div");
-              previewBlock.className = PREVIEW_SEGMENT_CLASS; // Using PREVIEW_SEGMENT_CLASS for all-day as it's more like month/year segments
-              if (isOverallColliding) previewBlock.classList.add(COLLIDING_PREVIEW_CLASS);
-              previewBlock.style.backgroundColor = eventData.color ? `${eventData.color}99` : `rgba(59, 130, 246, 0.6)`;
-              previewBlock.style.position = "absolute";
-              previewBlock.style.top = `${segmentTargetLevel * (viewConfigForPreview.overlayHeight + viewConfigForPreview.verticalSpacing)}px`;
-              previewBlock.style.height = `${viewConfigForPreview.overlayHeight}px`;
+        const dayInGrid = viewStartDt.plus({ days: i }).startOf("day");
+        if (dayInGrid.equals(currentSegmentStartDay)) segmentStartDayIndexInView = i;
+        if (dayInGrid.equals(currentSegmentEndDay)) {
+          segmentEndDayIndexInView = i;
+          break;
+        }
+        if (i === numDaysInCurrentView - 1 && currentSegmentEndDay > dayInGrid) {
+          segmentEndDayIndexInView = i;
+        }
+      }
 
-              const slotWidth = firstSlotOfDisplaySegment.offsetWidth;
-              previewBlock.style.left = `${firstSlotOfDisplaySegment.offsetLeft}px`;
-              previewBlock.style.width = `${numDaysInDisplaySegment * slotWidth - (numDaysInDisplaySegment > 1 && numDaysInCurrentView > 1 ? 2 : 0)}px`; // -2 for gap if multi-day in week view
+      if (segmentStartDayIndexInView !== -1 && segmentEndDayIndexInView !== -1 && segmentStartDayIndexInView <= segmentEndDayIndexInView) {
+        const firstSlotDateStr = viewStartDt.plus({ days: segmentStartDayIndexInView }).toFormat("yyyy-MM-dd");
+        const firstSlotOfDisplaySegment = allDayRow.querySelector(`.week-all-day-slot[data-date="${firstSlotDateStr}"]`);
 
-              previewBlock.textContent = eventData.name;
-              allDayRow.appendChild(previewBlock);
+        if (firstSlotOfDisplaySegment) {
+          const previewBlock = getPreviewElementFromPool();
+          previewBlock.className = PREVIEW_SEGMENT_CLASS;
+          if (isOverallColliding) previewBlock.classList.add(COLLIDING_PREVIEW_CLASS);
+          previewBlock.style.backgroundColor = eventData.color ? `${eventData.color}99` : `rgba(59, 130, 246, 0.6)`;
+          previewBlock.style.position = "absolute";
+          previewBlock.style.top = `${segmentTargetLevel * (viewConfigForPreview.overlayHeight + viewConfigForPreview.verticalSpacing)}px`;
+          previewBlock.style.height = `${viewConfigForPreview.overlayHeight}px`;
+
+          let totalWidth = 0;
+          let calculatedLeft = firstSlotOfDisplaySegment.offsetLeft;
+
+          if (activeResizeOperationCache.allDaySlotGeometries.size > 0) {
+            const firstSlotGeom = activeResizeOperationCache.allDaySlotGeometries.get(firstSlotDateStr);
+            if (firstSlotGeom) calculatedLeft = firstSlotGeom.left;
+            for (let k = segmentStartDayIndexInView; k <= segmentEndDayIndexInView; k++) {
+              const currentSlotDateStr = viewStartDt.plus({ days: k }).toFormat("yyyy-MM-dd");
+              const slotGeom = activeResizeOperationCache.allDaySlotGeometries.get(currentSlotDateStr);
+              if (slotGeom) totalWidth += slotGeom.width;
+              else {
+                const slotEl = allDayRow.querySelector(`.week-all-day-slot[data-date="${currentSlotDateStr}"]`);
+                if (slotEl) totalWidth += slotEl.offsetWidth;
+              }
             }
-            break;
+          } else {
+            for (let k = segmentStartDayIndexInView; k <= segmentEndDayIndexInView; k++) {
+              const currentSlotDateStr = viewStartDt.plus({ days: k }).toFormat("yyyy-MM-dd");
+              const currentSlot = allDayRow.querySelector(`.week-all-day-slot[data-date="${currentSlotDateStr}"]`);
+              if (currentSlot) totalWidth += currentSlot.offsetWidth;
+            }
           }
+          previewBlock.style.left = `${calculatedLeft}px`;
+
+          const segmentIsMultiDayVisual = segmentEndDayIndexInView > segmentStartDayIndexInView;
+          const gap = segmentIsMultiDayVisual && numDaysInCurrentView > 1 ? 2 : 0;
+
+          previewBlock.style.width = `${totalWidth > 0 ? totalWidth - gap : 0}px`;
+          if (totalWidth <= 0) previewBlock.style.display = "none";
+
+          previewBlock.textContent = eventData.name;
+          allDayRow.appendChild(previewBlock);
         }
       }
     }
   } else {
-    // Timed event
-    isOverallColliding = checkBasicResizePreviewCollision(eventData, resizedEventId, activeResizeOperationCache.currentView, viewConfigForPreview.displayZone);
+    isOverallColliding = checkCollision(eventData, resizedEventId, activeResizeOperationCache.currentView, viewConfigForPreview.displayZone);
+    const timedPreviewFrag = document.createDocumentFragment();
     for (let i = 0; i < numDaysInCurrentView; i++) {
       const currentColumnDay = viewStartDt.plus({ days: i });
-      const dayColumnElement = dayColumnsData[i].element;
+      const dayColumnElement = currentDayColumns[i].element;
       if (!eventData._startDt.isValid || !eventData._endDt.isValid) continue;
 
       const eventIntervalUtc = luxon.Interval.fromDateTimes(eventData._startDt, eventData._endDt);
       if (!eventIntervalUtc.isValid) continue;
-
       const columnDayIntervalUtc = luxon.Interval.fromDateTimes(currentColumnDay.startOf("day").toUTC(), currentColumnDay.endOf("day").toUTC());
       if (!eventIntervalUtc.overlaps(columnDayIntervalUtc)) continue;
 
@@ -369,36 +463,32 @@ function renderWeekDayViewResizePreview(previewEventData, viewConfigForPreview) 
       let eventEndHourFraction = 24;
       if (endDisp.hasSame(currentColumnDay, "day")) {
         eventEndHourFraction = endDisp.hour + endDisp.minute / 60;
-        // If event ends at 00:00 on the same day it started, it means 0 duration, skip
         if (eventEndHourFraction === 0 && startDisp.hasSame(endDisp, "day")) continue;
       }
-      // If event ends at 00:00 of the *next* day, it fills current day until 24:00
-      // If event ends at 00:00 of *current* day but started *before* current day, it means it doesn't show on current day.
-      if (eventEndHourFraction === 0 && endDisp.startOf("day").equals(currentColumnDay) && !startDisp.hasSame(endDisp, "day")) {
-        continue;
-      }
+      if (eventEndHourFraction === 0 && endDisp.startOf("day").equals(currentColumnDay) && !startDisp.hasSame(endDisp, "day")) continue;
 
       if (eventEndHourFraction <= eventStartHourFraction && startDisp.hasSame(endDisp, "day")) {
-        if (startDisp.equals(endDisp)) continue; // Truly zero duration
-        eventEndHourFraction = eventStartHourFraction + 15 / 60; // Min 15 min visual
+        if (startDisp.equals(endDisp)) continue;
+        eventEndHourFraction = eventStartHourFraction + 15 / 60;
       }
 
       const top = eventStartHourFraction * HOUR_HEIGHT_IN_WEEK_VIEW;
       let height = (eventEndHourFraction - eventStartHourFraction) * HOUR_HEIGHT_IN_WEEK_VIEW;
 
-      if (height <= 1 && height > 0) height = HOUR_HEIGHT_IN_WEEK_VIEW / 4; // Min visual height
+      if (height <= 1 && height > 0) height = HOUR_HEIGHT_IN_WEEK_VIEW / 4;
       if (height <= 0) continue;
 
-      const previewBlock = document.createElement("div");
+      const previewBlock = getPreviewElementFromPool();
       previewBlock.className = WEEK_RESIZE_PREVIEW_CLASS;
       if (isOverallColliding) previewBlock.classList.add(COLLIDING_PREVIEW_CLASS);
       previewBlock.style.backgroundColor = eventData.color ? `${eventData.color}99` : `rgba(59, 130, 246, 0.6)`;
       previewBlock.style.top = `${top}px`;
       previewBlock.style.height = `${height}px`;
-      previewBlock.style.left = `0%`; // Will be positioned within the day column
-      previewBlock.style.width = `calc(100% - 4px)`; // Standard width within column
+      previewBlock.style.left = `0%`;
+      previewBlock.style.width = `calc(100% - 4px)`;
       previewBlock.style.marginLeft = `2px`;
       if (currentColumnDay.hasSame(startDisp, "day")) previewBlock.textContent = `${eventData.name}`;
+
       dayColumnElement.appendChild(previewBlock);
     }
   }
@@ -407,22 +497,13 @@ function renderWeekDayViewResizePreview(previewEventData, viewConfigForPreview) 
 
 function renderResizePreview(previewEventData) {
   clearResizePreview();
-  const displayZone = resizeCurrentViewAppZone;
+  const viewConfig = getResizeViewConfig();
+  const preparedEvent = prepareEventForResize(previewEventData, viewConfig);
 
-  const viewConfigForPreview = {
-    viewName: activeResizeOperationCache.currentView,
-    overlayHeight: activeResizeOperationCache.currentView === "year" ? 5 : activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day" ? 18 : 18,
-    verticalSpacing: activeResizeOperationCache.currentView === "year" ? 1 : activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day" ? 3 : 2,
-    maxPlacementLevels: activeResizeOperationCache.currentView === "year" ? 3 : 3,
-    displayZone: displayZone,
-    hourHeightPx: HOUR_HEIGHT_IN_WEEK_VIEW,
-  };
-
-  if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year") {
-    if (typeof window.createEventSegmentElement !== "function") return;
-    renderMonthYearResizePreview(previewEventData, viewConfigForPreview);
-  } else if (activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day") {
-    renderWeekDayViewResizePreview(previewEventData, viewConfigForPreview);
+  if (viewConfig.viewName === "month" || viewConfig.viewName === "year") {
+    renderMonthYearResizePreview(preparedEvent, viewConfig);
+  } else if (viewConfig.viewName === "week" || viewConfig.viewName === "day") {
+    renderWeekDayViewResizePreview(preparedEvent, viewConfig);
   }
 }
 
@@ -435,46 +516,48 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
   if ((currentView === "week" || currentView === "day") && !isOriginalAllDay && (resizeMode === "top" || resizeMode === "bottom")) {
     const targetDateStr = newTargetInfo.dateString;
     let targetHour = newTargetInfo.hour;
-    const targetMinute = newTargetInfo.minute || 0;
-    let newStartLocal, newEndLocal;
 
-    const originalStartDt = originalEvent._startDt && originalEvent._startDt.isValid ? originalEvent._startDt : luxon.DateTime.fromISO(originalEvent.start_utc, { zone: "utc" });
-    const originalEndDt = originalEvent._endDt && originalEvent._endDt.isValid ? originalEvent._endDt : luxon.DateTime.fromISO(originalEvent.end_utc, { zone: "utc" });
+    const originalStartUtcDt = originalEvent._startDt && originalEvent._startDt.isValid ? originalEvent._startDt : luxon.DateTime.fromISO(originalEvent.start_utc, { zone: "utc" });
+    const originalEndUtcDt = originalEvent._endDt && originalEvent._endDt.isValid ? originalEvent._endDt : luxon.DateTime.fromISO(originalEvent.end_utc, { zone: "utc" });
 
-    if (!originalStartDt.isValid || !originalEndDt.isValid) {
-      console.warn("Week/Day timed resize: Invalid original Luxon dates.");
+    if (!originalStartUtcDt.isValid || !originalEndUtcDt.isValid) {
       return updatedEvent;
     }
 
+    const minDuration = luxon.Duration.fromObject({ hours: 1 });
+    let newStartLocal, newEndLocal;
+
     if (resizeMode === "top") {
-      newStartLocal = luxon.DateTime.fromISO(targetDateStr, { zone: originalStartTimezone }).set({ hour: targetHour, minute: targetMinute });
-      newEndLocal = originalEndDt.setZone(originalEndTimezone);
-      if (newStartLocal.isValid && newEndLocal.isValid && newStartLocal.toUTC() >= newEndLocal.toUTC()) {
-        newEndLocal = newStartLocal.setZone(originalEndTimezone).plus({ hours: 1 });
+      newStartLocal = luxon.DateTime.fromISO(targetDateStr, { zone: originalStartTimezone }).set({ hour: targetHour, minute: 0, second: 0, millisecond: 0 });
+      newEndLocal = originalEndUtcDt.setZone(originalEndTimezone);
+
+      if (newStartLocal.plus(minDuration) > newEndLocal) {
+        newEndLocal = newStartLocal.plus(minDuration);
       }
     } else {
-      // resizeMode === "bottom"
-      newStartLocal = originalStartDt.setZone(originalStartTimezone);
-      // For bottom resize, the targetHour effectively means the END of that hour slot
-      if (typeof newTargetInfo.minute === "number" && newTargetInfo.minute !== 0) {
-        // if specific minute is given (less likely for pure slot drag)
-        newEndLocal = luxon.DateTime.fromISO(targetDateStr, { zone: originalEndTimezone }).set({ hour: targetHour, minute: targetMinute });
-      } else {
-        // Assume targetHour means the slot ending at targetHour+1 or lasting through targetHour
-        newEndLocal = luxon.DateTime.fromISO(targetDateStr, { zone: originalEndTimezone }).set({ hour: targetHour, minute: 0 }).plus({ hours: 1 });
-      }
+      newEndLocal = luxon.DateTime.fromISO(targetDateStr, { zone: originalEndTimezone }).set({ hour: targetHour + 1, minute: 0, second: 0, millisecond: 0 });
+      newStartLocal = originalStartUtcDt.setZone(originalStartTimezone);
 
-      if (newStartLocal.isValid && newEndLocal.isValid && newEndLocal.toUTC() <= newStartLocal.toUTC()) {
-        // If end is before or same as start, make it at least 15 min after start
-        newEndLocal = newStartLocal.setZone(originalEndTimezone).plus({ minutes: 15 });
+      if (newEndLocal.minus(minDuration) < newStartLocal) {
+        newStartLocal = newEndLocal.minus(minDuration);
       }
     }
+
+    if (newStartLocal.isValid && newEndLocal.isValid && newStartLocal.toUTC() >= newEndLocal.toUTC()) {
+      if (resizeMode === "top") {
+        newEndLocal = newStartLocal.plus(minDuration.isValid ? minDuration : { minutes: 15 });
+      } else {
+        newStartLocal = newEndLocal.minus(minDuration.isValid ? minDuration : { minutes: 15 });
+      }
+    }
+
     if (newStartLocal && newStartLocal.isValid) {
       updatedEvent.start = newStartLocal.toFormat("yyyy-MM-dd");
       updatedEvent.time = newStartLocal.toFormat("HH:mm");
       updatedEvent.start_utc = newStartLocal.toUTC().toISO();
       updatedEvent.startTimezone = originalStartTimezone;
     }
+
     if (newEndLocal && newEndLocal.isValid) {
       updatedEvent.end = newEndLocal.toFormat("yyyy-MM-dd");
       updatedEvent.endTime = newEndLocal.toFormat("HH:mm");
@@ -482,7 +565,6 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
       updatedEvent.endTimezone = originalEndTimezone;
     }
   } else {
-    // All-Day events in any view, OR Timed events in Month/Year view (date-handle resize)
     const newDateCellString = newTargetInfo.dateString;
     const newTargetDayOnlyDt = luxon.DateTime.fromISO(newDateCellString, { zone: appZone }).startOf("day");
 
@@ -491,15 +573,10 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
       let currentEndDt = luxon.DateTime.fromISO(originalEvent.end, { zone: appZone }).startOf("day");
       if (resizeMode === "start") {
         currentStartDt = newTargetDayOnlyDt;
-        if (currentStartDt.isValid && currentEndDt.isValid && currentStartDt > currentEndDt) {
-          currentEndDt = currentStartDt;
-        }
+        if (currentStartDt.isValid && currentEndDt.isValid && currentStartDt > currentEndDt) currentEndDt = currentStartDt;
       } else {
-        // resizeMode === "end"
         currentEndDt = newTargetDayOnlyDt;
-        if (currentStartDt.isValid && currentEndDt.isValid && currentEndDt < currentStartDt) {
-          currentStartDt = currentEndDt;
-        }
+        if (currentStartDt.isValid && currentEndDt.isValid && currentEndDt < currentStartDt) currentStartDt = currentEndDt;
       }
       if (currentStartDt.isValid) updatedEvent.start = currentStartDt.toFormat("yyyy-MM-dd");
       if (currentEndDt.isValid) updatedEvent.end = currentEndDt.toFormat("yyyy-MM-dd");
@@ -510,45 +587,30 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
       delete updatedEvent.startTimezone;
       delete updatedEvent.endTimezone;
     } else {
-      // Timed event, date-handle resize (Month/Year view)
       const origStartStr = originalEvent.time || "00:00";
-      const origEndStr = originalEvent.endTime || "00:00"; // Should exist for well-formed timed events
-
-      const newTargetDateLuxon = luxon.DateTime.fromISO(newTargetInfo.dateString, { zone: appZone }).startOf("day");
-
+      const origEndStr = originalEvent.endTime || "00:00";
       let finalEffectiveStartDate = luxon.DateTime.fromISO(originalEvent.start, { zone: appZone }).startOf("day");
       let finalEffectiveEndDate = luxon.DateTime.fromISO(originalEvent.end, { zone: appZone }).startOf("day");
 
       if (resizeMode === "start") {
-        const newStartDateCandidate = newTargetDateLuxon;
-        if (newStartDateCandidate.toMillis() > finalEffectiveEndDate.toMillis()) {
-          finalEffectiveEndDate = newStartDateCandidate;
+        finalEffectiveStartDate = newTargetDayOnlyDt;
+        if (finalEffectiveStartDate.isValid && finalEffectiveEndDate.isValid && finalEffectiveStartDate > finalEffectiveEndDate) {
+          finalEffectiveEndDate = finalEffectiveStartDate;
         }
-        finalEffectiveStartDate = newStartDateCandidate;
       } else {
-        // resizeMode === "end"
-        const newEndDateCandidate = newTargetDateLuxon;
-        if (newEndDateCandidate.toMillis() < finalEffectiveStartDate.toMillis()) {
-          finalEffectiveStartDate = newEndDateCandidate;
+        finalEffectiveEndDate = newTargetDayOnlyDt;
+        if (finalEffectiveStartDate.isValid && finalEffectiveEndDate.isValid && finalEffectiveEndDate < finalEffectiveStartDate) {
+          finalEffectiveStartDate = finalEffectiveEndDate;
         }
-        finalEffectiveEndDate = newEndDateCandidate;
       }
 
       const [sH, sM] = origStartStr.split(":").map(Number);
       const [eH, eM] = origEndStr.split(":").map(Number);
-
       let finalNewStartLocal = finalEffectiveStartDate.setZone(originalEvent.startTimezone || appZone).set({ hour: sH, minute: sM });
       let finalNewEndLocal = finalEffectiveEndDate.setZone(originalEvent.endTimezone || appZone).set({ hour: eH, minute: eM });
 
-      if (finalNewStartLocal.toUTC() >= finalNewEndLocal.toUTC()) {
+      if (finalNewStartLocal.isValid && finalNewEndLocal.isValid && finalNewStartLocal.toUTC() >= finalNewEndLocal.toUTC()) {
         finalNewEndLocal = finalNewStartLocal.setZone(originalEvent.endTimezone || appZone).plus({ hours: 1 });
-        if (finalNewStartLocal.hasSame(finalNewEndLocal, "day")) {
-          if (resizeMode === "start" && finalEffectiveStartDate.equals(finalEffectiveEndDate)) {
-            finalNewEndLocal = finalNewEndLocal.plus({ days: 1 });
-          } else if (finalNewStartLocal.toMillis() === finalNewEndLocal.toMillis()) {
-            finalNewEndLocal = finalNewEndLocal.plus({ hours: 1 });
-          }
-        }
       }
 
       if (finalNewStartLocal && finalNewStartLocal.isValid) {
@@ -568,69 +630,95 @@ function calculateResizedEventProperties(originalEvent, newTargetInfo, resizeMod
   return updatedEvent;
 }
 
-function checkBasicResizePreviewCollision(previewEventData, resizedEventOriginalId, currentView, appDisplayZone) {
-  if ((currentView !== "week" && currentView !== "day") || previewEventData._isAllDay) return false;
-  if (!previewEventData._startDt || !previewEventData._startDt.isValid || !previewEventData._endDt || !previewEventData._endDt.isValid) return false;
-
-  const previewStart = previewEventData._startDt.setZone(appDisplayZone);
-  const previewEnd = previewEventData._endDt.setZone(appDisplayZone);
-
-  const otherEvents = (originalResizedEvent?._otherEventsCache || []).filter((e) => !e._isAllDay && e.start_utc && e.end_utc);
-
-  let iterEndDayTimed = previewEnd.startOf("day");
-  if (previewEnd.hour === 0 && previewEnd.minute === 0 && previewEnd.second === 0 && !previewStart.hasSame(previewEnd, "day")) {
-    iterEndDayTimed = previewEnd.minus({ days: 1 }).startOf("day");
+function isTimedEvent(view, eventData) {
+  if (!eventData) return false;
+  if (view === "week" || view === "day") {
+    return eventData._isAllDay === false;
   }
-  if (iterEndDayTimed < previewStart.startOf("day")) iterEndDayTimed = previewStart.startOf("day");
-
-  for (let dayIter = previewStart.startOf("day"); dayIter <= iterEndDayTimed; dayIter = dayIter.plus({ days: 1 })) {
-    const effectivePreviewStart = luxon.DateTime.max(previewStart, dayIter.startOf("day"));
-    const effectivePreviewEnd = luxon.DateTime.min(previewEnd, dayIter.endOf("day"));
-    if (!effectivePreviewStart.isValid || !effectivePreviewEnd.isValid || effectivePreviewStart >= effectivePreviewEnd) continue;
-    const previewIntervalOnDay = luxon.Interval.fromDateTimes(effectivePreviewStart, effectivePreviewEnd);
-
-    for (const otherEvent of otherEvents) {
-      if (!otherEvent._startDt.isValid || !otherEvent._endDt.isValid) continue;
-      const otherStart = otherEvent._startDt.setZone(appDisplayZone);
-      const otherEnd = otherEvent._endDt.setZone(appDisplayZone);
-
-      const effectiveOtherStart = luxon.DateTime.max(otherStart, dayIter.startOf("day"));
-      const effectiveOtherEnd = luxon.DateTime.min(otherEnd, dayIter.endOf("day"));
-      if (!effectiveOtherStart.isValid || !effectiveOtherEnd.isValid || effectiveOtherStart >= effectiveOtherEnd) continue;
-      const otherIntervalOnDay = luxon.Interval.fromDateTimes(effectiveOtherStart, effectiveOtherEnd);
-
-      if (previewIntervalOnDay.isValid && otherIntervalOnDay.isValid && previewIntervalOnDay.overlaps(otherIntervalOnDay) && previewIntervalOnDay.length("milliseconds") > 0 && otherIntervalOnDay.length("milliseconds") > 0) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return !!eventData.start_utc;
 }
+
+function getDayInterval(eventData, dayString, zone) {
+  if (!eventData || !eventData._startDt || !eventData._startDt.isValid || !eventData._endDt || !eventData._endDt.isValid) {
+    return luxon.Interval.invalid("Invalid event data for interval");
+  }
+
+  const dayStart = luxon.DateTime.fromISO(dayString, { zone }).startOf("day");
+  const dayEnd = luxon.DateTime.fromISO(dayString, { zone }).endOf("day");
+
+  const eventStartInZone = eventData._startDt.setZone(zone);
+  const eventEndInZone = eventData._endDt.setZone(zone);
+
+  if (!eventStartInZone.isValid || !eventEndInZone.isValid) {
+    return luxon.Interval.invalid("Event dates invalid in target zone");
+  }
+
+  const intervalStart = luxon.DateTime.max(eventStartInZone, dayStart);
+  const intervalEnd = luxon.DateTime.min(eventEndInZone, dayEnd);
+
+  if (intervalStart >= intervalEnd) {
+    return luxon.Interval.invalid("No overlap with the specified day");
+  }
+
+  return luxon.Interval.fromDateTimes(intervalStart, intervalEnd);
+}
+
+function checkCollision(previewEvent, originalId, view, zone) {
+  if (!isTimedEvent(view, previewEvent)) {
+    return false;
+  }
+
+  if (!activeResizeOperationCache || !activeResizeOperationCache.allDayColumns || activeResizeOperationCache.allDayColumns.length === 0) {
+    return false;
+  }
+  if (!originalResizedEvent || !originalResizedEvent._otherEventsCache) {
+    return false;
+  }
+
+  return activeResizeOperationCache.allDayColumns.some((column) => {
+    const day = column.element.dataset.date;
+    const previewInterval = getDayInterval(previewEvent, day, zone);
+    if (!previewInterval || !previewInterval.isValid) return false;
+
+    return originalResizedEvent._otherEventsCache.some((other) => {
+      if (other._isAllDay || other.id === originalId) return false;
+
+      const otherInterval = getDayInterval(other, day, zone);
+      if (!otherInterval || !otherInterval.isValid) return false;
+
+      return otherInterval.overlaps(previewInterval);
+    });
+  });
+}
+window.checkCollision = checkCollision;
 
 function getElementUnderCursorIgnoringPreviews(clientX, clientY) {
   const previewSelectors = [`.${PREVIEW_SEGMENT_CLASS}`, `.${WEEK_RESIZE_PREVIEW_CLASS}`];
+  const temporarilyIgnoredElements = [];
+
+  document.querySelectorAll(previewSelectors.join(",")).forEach((el) => {
+    if (el.style.display !== "none") {
+      temporarilyIgnoredElements.push(el);
+      el.classList.add(TEMP_IGNORE_POINTER_CLASS);
+    }
+  });
+
   let element = document.elementFromPoint(clientX, clientY);
-  const hiddenElements = [];
-  let depth = 0;
 
-  while (element && previewSelectors.some((sel) => element.matches(sel)) && depth < 5) {
-    hiddenElements.push({ el: element, display: element.style.display });
-    element.style.display = "none";
-    element = document.elementFromPoint(clientX, clientY);
-    depth++;
-  }
+  temporarilyIgnoredElements.forEach((el) => {
+    el.classList.remove(TEMP_IGNORE_POINTER_CLASS);
+  });
 
-  for (let i = hiddenElements.length - 1; i >= 0; i--) {
-    hiddenElements[i].el.style.display = hiddenElements[i].display;
-  }
   return element;
 }
 
-function handleMouseDownOnOverlay(event) {
-  if (event.button !== 0 || window.calendarInteractionState.isResizing || document.body.classList.contains("is-dragging-active")) return;
-  const overlay = event.target.closest(".event-overlay, .week-event-block, .week-all-day-event-segment");
-  if (!overlay) return;
+function _initiateResize(pointerEvent, isTouch = false) {
+  if (!isTouch && pointerEvent.button !== 0) return;
+  if (document.body.classList.contains("is-dragging-active") && !window.calendarInteractionState.isResizing) return;
+  if (window.calendarInteractionState.isResizing && resizedEventId) return;
 
+  const overlay = pointerEvent.target.closest(".event-overlay, .week-event-block, .week-all-day-event-segment");
+  if (!overlay) return;
   const eventId = overlay.dataset.eventId;
   const currentEventData = customEvents.find((e) => e.id === eventId);
   if (!currentEventData) return;
@@ -642,38 +730,51 @@ function handleMouseDownOnOverlay(event) {
   }
 
   const rect = overlay.getBoundingClientRect();
-  const offsetX = event.clientX - rect.left;
-  const offsetY = event.clientY - rect.top;
+  const coords = getPointerCoordinates(pointerEvent);
+  const offsetX = coords.clientX - rect.left;
+  const offsetY = coords.clientY - rect.top;
   const overlayWidth = overlay.offsetWidth;
   const overlayHeight = overlay.offsetHeight;
   let localResizeMode = null;
   const currentViewValue = viewSelect.value;
   const isEventBeingResizedAllDay = eventDataForResizeInit._isAllDay;
 
+  originalResizedEvent = JSON.parse(JSON.stringify(eventDataForResizeInit));
+  originalResizedEvent._startDt = eventDataForResizeInit._startDt;
+  originalResizedEvent._endDt = eventDataForResizeInit._endDt;
+  originalResizedEvent._isAllDay = isEventBeingResizedAllDay;
+
   if ((currentViewValue === "week" || currentViewValue === "day") && overlay.classList.contains("week-event-block") && !isEventBeingResizedAllDay) {
     if (offsetY < RESIZE_HANDLE_WIDTH_PX) localResizeMode = "top";
     else if (offsetY > overlayHeight - RESIZE_HANDLE_WIDTH_PX) localResizeMode = "bottom";
   } else if (overlay.classList.contains("event-overlay") || overlay.classList.contains("week-all-day-event-segment")) {
-    const isTrueStartVisualSegment = overlay.classList.contains("event-overlay-start") || overlay.classList.contains("week-all-day-event-segment");
-    const isTrueEndVisualSegment = overlay.classList.contains("event-overlay-end") || overlay.classList.contains("week-all-day-event-segment");
-    let handleThreshold = RESIZE_HANDLE_WIDTH_PX;
-    if ((currentViewValue === "month" || currentViewValue === "year") && !isEventBeingResizedAllDay) {
-      if (overlayWidth < RESIZE_HANDLE_WIDTH_PX * 3 && overlayWidth > 0) handleThreshold = Math.max(overlayWidth / 2.5, 5);
+    const canResizeStart = overlay.classList.contains("event-overlay-start") || overlay.classList.contains("week-all-day-event-segment");
+    const canResizeEnd = overlay.classList.contains("event-overlay-end") || overlay.classList.contains("week-all-day-event-segment");
+    const clickOnStartArea = offsetX >= 0 && offsetX < RESIZE_HANDLE_WIDTH_PX;
+    const clickOnEndArea = offsetX >= overlayWidth - RESIZE_HANDLE_WIDTH_PX && offsetX <= overlayWidth;
+
+    if (canResizeStart && clickOnStartArea) {
+      if (canResizeEnd && clickOnEndArea) {
+        if (overlayWidth < RESIZE_HANDLE_WIDTH_PX * 1.5) localResizeMode = null;
+        else if (offsetX < overlayWidth / 2) localResizeMode = "start";
+        else localResizeMode = "end";
+      } else {
+        localResizeMode = "start";
+      }
+    } else if (canResizeEnd && clickOnEndArea) {
+      localResizeMode = "end";
+    } else {
+      localResizeMode = null;
     }
-    if (isTrueEndVisualSegment && offsetX > overlayWidth - handleThreshold) localResizeMode = "end";
-    else if (isTrueStartVisualSegment && offsetX < handleThreshold) localResizeMode = "start";
   }
 
   if (localResizeMode) {
-    event.preventDefault();
-    event.stopPropagation();
+    pointerEvent.preventDefault();
+    if (isTouch) pointerEvent.stopPropagation();
+
     window.calendarInteractionState.isResizing = true;
     resizeMode = localResizeMode;
     resizedEventId = eventId;
-    originalResizedEvent = JSON.parse(JSON.stringify(eventDataForResizeInit));
-    originalResizedEvent._startDt = eventDataForResizeInit._startDt;
-    originalResizedEvent._endDt = eventDataForResizeInit._endDt;
-    originalResizedEvent._isAllDay = eventDataForResizeInit._isAllDay;
 
     resizeCurrentViewAppZone = luxon.DateTime.local().zoneName;
     lastValidResizeTargetInfo = null;
@@ -682,18 +783,27 @@ function handleMouseDownOnOverlay(event) {
 
     activeResizeOperationCache.currentView = currentViewValue;
     if (currentViewValue === "week" || currentViewValue === "day") {
-      activeResizeOperationCache.daysContainer = document.querySelector(`.${currentViewValue}-view .week-days-container`);
-      if (!activeResizeOperationCache.daysContainer) activeResizeOperationCache.daysContainer = document.querySelector(".week-days-container");
-
+      activeResizeOperationCache.daysContainer = document.querySelector(`.${currentViewValue}-view .week-days-container`) || document.querySelector(".week-days-container");
       if (activeResizeOperationCache.daysContainer) {
         activeResizeOperationCache.allDayColumns = Array.from(activeResizeOperationCache.daysContainer.querySelectorAll(".week-day-column[data-date]")).map((col) => ({ element: col, rect: col.getBoundingClientRect() }));
       } else {
         activeResizeOperationCache.allDayColumns = Array.from(document.querySelectorAll(`.calendar-container.${currentViewValue}-view .week-day-column[data-date]`)).map((col) => ({ element: col, rect: col.getBoundingClientRect() }));
-        if (activeResizeOperationCache.allDayColumns.length === 0) console.warn("Could not find day columns for resize cache.");
+      }
+
+      const allDayRowForCache = document.querySelector(`.${currentViewValue}-view .week-all-day-row`) || document.querySelector(".week-all-day-row");
+      cacheSlotGeometries();
+      if (allDayRowForCache) {
+        allDayRowForCache.querySelectorAll(".week-all-day-slot[data-date]").forEach((slot) => {
+          activeResizeOperationCache.allDaySlotGeometries.set(slot.dataset.date, {
+            width: slot.offsetWidth,
+            left: slot.offsetLeft,
+          });
+        });
       }
     } else {
       activeResizeOperationCache.daysContainer = null;
       activeResizeOperationCache.allDayColumns = [];
+      cacheSlotGeometries();
     }
 
     const levelString = overlay.dataset.level;
@@ -708,19 +818,15 @@ function handleMouseDownOnOverlay(event) {
       })
       .filter(Boolean);
 
-    let visibleContexts = [];
+    let visibleContextsForLevelCache = [];
     if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year" || ((activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day") && originalResizedEvent._isAllDay)) {
       if (activeResizeOperationCache.currentView === "month" || activeResizeOperationCache.currentView === "year") {
-        visibleContexts = Array.from(document.querySelectorAll(".month-card"));
+        visibleContextsForLevelCache = Array.from(document.querySelectorAll(".month-card"));
       } else {
-        const allDayRow = document.querySelector(`.${activeResizeOperationCache.currentView}-view .week-all-day-row`);
-        if (allDayRow) visibleContexts = [allDayRow];
-        else {
-          const genericAllDayRow = document.querySelector(".week-all-day-row");
-          if (genericAllDayRow) visibleContexts = [genericAllDayRow];
-        }
+        const allDayRow = document.querySelector(`.${activeResizeOperationCache.currentView}-view .week-all-day-row`) || document.querySelector(".week-all-day-row");
+        if (allDayRow) visibleContextsForLevelCache = [allDayRow];
       }
-      originalResizedEvent._renderedEventLevelsCache = _buildRenderedEventLevelsCache(activeResizeOperationCache.currentView, resizedEventId, visibleContexts);
+      originalResizedEvent._renderedEventLevelsCache = _buildRenderedEventLevelsCache(activeResizeOperationCache.currentView, resizedEventId, visibleContextsForLevelCache);
     } else {
       originalResizedEvent._renderedEventLevelsCache = new Map();
     }
@@ -728,55 +834,68 @@ function handleMouseDownOnOverlay(event) {
     document.querySelectorAll(".event-overlay, .week-event-block, .week-all-day-event-segment").forEach((o) => {
       if (o.dataset.eventId !== resizedEventId) o.classList.add(RESIZE_OBSTRUCTING_IGNORE_CLASS);
     });
-    document.querySelectorAll(`.event-overlay[data-event-id="${resizedEventId}"], .week-event-block[data-event-id="${resizedEventId}"], .week-all-day-event-segment[data-event-id="${resizedEventId}"]`).forEach((seg) => seg.classList.add(RESIZING_ORIGINAL_HIDDEN_CLASS));
+    document.querySelectorAll(`.${EVENT_OVERLAY_CLASS}[data-event-id="${resizedEventId}"], .${WEEK_EVENT_BLOCK_CLASS}[data-event-id="${resizedEventId}"], .${WEEK_ALL_DAY_EVENT_SEGMENT_CLASS}[data-event-id="${resizedEventId}"]`).forEach((seg) => seg.classList.add(RESIZING_ORIGINAL_HIDDEN_CLASS));
 
     const initialPreviewData = { ...originalResizedEvent, _isOverallCollidingPreview: false };
     throttledRenderPreview(initialPreviewData);
 
-    document.addEventListener("mousemove", handleDocumentMouseMove);
-    document.addEventListener("mouseup", handleDocumentMouseUp, { once: true });
+    if (isTouch) {
+      document.addEventListener("touchmove", handlePointerMove, { passive: false });
+      document.addEventListener("touchend", _handleDocumentTouchEnd, { once: true });
+      document.addEventListener("touchcancel", _handleDocumentTouchEnd, { once: true });
+    } else {
+      document.addEventListener("mousemove", handlePointerMove);
+      document.addEventListener("mouseup", _handleDocumentMouseUp, { once: true });
+    }
+
     document.body.classList.add("is-resizing-active");
     document.body.style.cursor = resizeMode === "top" || resizeMode === "bottom" ? "ns-resize" : "ew-resize";
   }
 }
 
-function handleDocumentMouseMove(event) {
-  if (!window.calendarInteractionState.isResizing || !originalResizedEvent) return;
-  event.preventDefault();
+function handleMouseDownOnOverlay(event) {
+  _initiateResize(event, false);
+}
 
+function _handleTouchStartOnOverlay(event) {
+  _initiateResize(event, true);
+}
+
+function isTouchEvent(event) {
+  return event.touches && event.touches.length > 0;
+}
+
+function _performResizeUpdate(pointerEvent) {
+  if (!window.calendarInteractionState.isResizing || !originalResizedEvent) return;
   let potentialTargetInfo = null;
   let newHoverElement = null;
   let currentTargetKey = null;
 
   const isOriginalTimed = originalResizedEvent && !originalResizedEvent._isAllDay;
   const hasValidOriginalDates = originalResizedEvent && originalResizedEvent._startDt && originalResizedEvent._startDt.isValid;
+  const coords = getPointerCoordinates(pointerEvent);
 
   if ((activeResizeOperationCache.currentView === "week" || activeResizeOperationCache.currentView === "day") && isOriginalTimed && hasValidOriginalDates && (resizeMode === "top" || resizeMode === "bottom")) {
     if (activeResizeOperationCache.allDayColumns.length > 0) {
       let targetDayColumnData = null;
       for (const colData of activeResizeOperationCache.allDayColumns) {
-        if (event.clientX >= colData.rect.left && event.clientX <= colData.rect.right) {
+        if (coords.clientX >= colData.rect.left && coords.clientX <= colData.rect.right) {
           targetDayColumnData = colData;
           break;
         }
       }
-
       if (targetDayColumnData && targetDayColumnData.element.dataset.date) {
-        const relativeYInColumn = event.clientY - targetDayColumnData.rect.top;
+        const relativeYInColumn = coords.clientY - targetDayColumnData.rect.top;
         let hourIndex = Math.floor(relativeYInColumn / HOUR_HEIGHT_IN_WEEK_VIEW);
         hourIndex = Math.max(0, Math.min(23, hourIndex));
-
-        potentialTargetInfo = {
-          dateString: targetDayColumnData.element.dataset.date,
-          hour: hourIndex,
-        };
+        potentialTargetInfo = { dateString: targetDayColumnData.element.dataset.date, hour: hourIndex };
         currentTargetKey = `${potentialTargetInfo.dateString}-${potentialTargetInfo.hour}`;
         const targetTimeStr = `${String(hourIndex).padStart(2, "0")}:00`;
         newHoverElement = targetDayColumnData.element.querySelector(`.hour-slot[data-time="${targetTimeStr}"][data-date="${targetDayColumnData.element.dataset.date}"]`) || targetDayColumnData.element;
       }
     }
   } else {
-    const tempElement = getElementUnderCursorIgnoringPreviews(event.clientX, event.clientY);
+    const tempElement = getElementUnderCursorIgnoringPreviews(coords.clientX, coords.clientY);
     if (tempElement) {
       newHoverElement = tempElement.closest(".day:not(.empty-day)[data-date], .week-all-day-slot[data-date]");
       if (newHoverElement) {
@@ -820,8 +939,12 @@ function handleDocumentMouseMove(event) {
   }
 }
 
-function handleDocumentMouseUp(event) {
-  document.removeEventListener("mousemove", handleDocumentMouseMove);
+function handlePointerMove(event) {
+  if (isTouchEvent(event)) event.preventDefault();
+  _performResizeUpdate(event);
+}
+
+function _finalizeResize(pointerEvent) {
   document.body.classList.remove("is-resizing-active");
   document.body.style.cursor = "";
 
@@ -829,12 +952,11 @@ function handleDocumentMouseUp(event) {
     resetResizeState();
     return;
   }
-  event.preventDefault();
+  pointerEvent.preventDefault();
   resetPointerEventsAndPreview();
   document.querySelectorAll(`.${RESIZING_ORIGINAL_HIDDEN_CLASS}[data-event-id="${resizedEventId}"]`).forEach((seg) => seg.classList.remove(RESIZING_ORIGINAL_HIDDEN_CLASS));
 
   const eventToUpdate = customEvents.find((e) => e.id === resizedEventId);
-
   if (!eventToUpdate) {
     resetResizeState();
     if (typeof window.renderEventVisuals === "function") requestAnimationFrame(window.renderEventVisuals);
@@ -842,7 +964,6 @@ function handleDocumentMouseUp(event) {
   }
 
   if (currentHoverTargetElement) currentHoverTargetElement.classList.remove(RESIZE_TARGET_HOVER_CLASS);
-
   if (!lastValidResizeTargetInfo) {
     resetResizeState();
     if (typeof window.renderEventVisuals === "function") requestAnimationFrame(window.renderEventVisuals);
@@ -864,6 +985,16 @@ function handleDocumentMouseUp(event) {
   if (typeof window.renderEventVisuals === "function") requestAnimationFrame(window.renderEventVisuals);
 }
 
+function _handleDocumentMouseUp(event) {
+  document.removeEventListener("mousemove", handlePointerMove);
+  _finalizeResize(event);
+}
+
+function _handleDocumentTouchEnd(event) {
+  document.removeEventListener("touchmove", handlePointerMove);
+  _finalizeResize(event);
+}
+
 function resetPointerEventsAndPreview() {
   clearResizePreview();
   document.querySelectorAll(`.${RESIZE_OBSTRUCTING_IGNORE_CLASS}`).forEach((o) => o.classList.remove(RESIZE_OBSTRUCTING_IGNORE_CLASS));
@@ -882,10 +1013,10 @@ function resetResizeStateOnly() {
   resizeInitialLevel = 0;
   resizeCurrentViewAppZone = "UTC";
   lastPreviewRecalculationTargetKey = null;
-
   activeResizeOperationCache.currentView = null;
   activeResizeOperationCache.daysContainer = null;
   activeResizeOperationCache.allDayColumns = [];
+  activeResizeOperationCache.allDaySlotGeometries.clear();
 }
 
 function resetResizeState() {
@@ -898,8 +1029,10 @@ function resetResizeState() {
     throttledRenderPreview.cancel();
   }
   resetResizeStateOnly();
-  document.removeEventListener("mousemove", handleDocumentMouseMove);
-  document.removeEventListener("mouseup", handleDocumentMouseUp);
+  document.removeEventListener("mousemove", handlePointerMove);
+  document.removeEventListener("mouseup", _handleDocumentMouseUp);
+  document.removeEventListener("touchmove", handlePointerMove);
+  document.removeEventListener("touchend", _handleDocumentTouchEnd);
   document.body.style.cursor = "";
 }
 
@@ -908,6 +1041,8 @@ function addEventResizeListeners() {
   eventElements.forEach((overlay) => {
     overlay.removeEventListener("mousedown", handleMouseDownOnOverlay);
     overlay.addEventListener("mousedown", handleMouseDownOnOverlay);
+    overlay.removeEventListener("touchstart", _handleTouchStartOnOverlay);
+    overlay.addEventListener("touchstart", _handleTouchStartOnOverlay, { passive: false });
     overlay.removeEventListener("mousemove", handleOverlayMouseMoveForCursor);
     overlay.addEventListener("mousemove", handleOverlayMouseMoveForCursor);
     overlay.removeEventListener("mouseleave", handleOverlayMouseLeaveForCursor);
@@ -919,9 +1054,10 @@ window.addEventResizeListeners = addEventResizeListeners;
 function handleOverlayMouseMoveForCursor(event) {
   if (window.calendarInteractionState.isResizing || document.body.classList.contains("is-dragging-active")) return;
   const overlay = event.currentTarget;
+  const coords = getPointerCoordinates(event);
   const rect = overlay.getBoundingClientRect();
-  const offsetX = event.clientX - rect.left;
-  const offsetY = event.clientY - rect.top;
+  const offsetX = coords.clientX - rect.left;
+  const offsetY = coords.clientY - rect.top;
   const overlayWidth = overlay.offsetWidth;
   const overlayHeight = overlay.offsetHeight;
   const currentView = document.getElementById("view-select")?.value || "month";
@@ -937,21 +1073,25 @@ function handleOverlayMouseMoveForCursor(event) {
       }
     }
   } else {
-    const isStartSegment = overlay.classList.contains("event-overlay-start") || ((currentView === "week" || currentView === "day") && overlay.classList.contains("week-all-day-event-segment"));
-    const isEndSegment = overlay.classList.contains("event-overlay-end") || ((currentView === "week" || currentView === "day") && overlay.classList.contains("week-all-day-event-segment"));
+    const isPotentiallyResizableHorizontally = overlay.classList.contains(EVENT_OVERLAY_CLASS) || overlay.classList.contains(WEEK_ALL_DAY_EVENT_SEGMENT_CLASS);
 
-    let handleThreshold = RESIZE_HANDLE_WIDTH_PX;
-    const eventId = overlay.dataset.eventId;
-    if (eventId) {
-      const eventData = customEvents.find((e) => e.id === eventId);
-      const isTimedMonthYearEvent = eventData && eventData.start_utc && (currentView === "month" || currentView === "year");
-      if (isTimedMonthYearEvent && overlayWidth < RESIZE_HANDLE_WIDTH_PX * 3 && overlayWidth > 0) {
-        handleThreshold = Math.max(overlayWidth / 2.5, 5);
+    if (isPotentiallyResizableHorizontally) {
+      let handleThreshold = RESIZE_HANDLE_WIDTH_PX;
+      const eventId = overlay.dataset.eventId;
+      if (eventId) {
+        const eventData = customEvents.find((e) => e.id === eventId);
+        const isTimedMonthYearEvent = eventData && eventData.start_utc && (currentView === "month" || currentView === "year");
+        if (isTimedMonthYearEvent && overlayWidth < RESIZE_HANDLE_WIDTH_PX * 3 && overlayWidth > 0) {
+          handleThreshold = Math.max(overlayWidth / 3, 5);
+        }
       }
-    }
 
-    if (isStartSegment && offsetX < handleThreshold) cursor = "ew-resize";
-    else if (isEndSegment && offsetX > overlayWidth - handleThreshold) cursor = "ew-resize";
+      const canResizeStart = overlay.classList.contains("event-overlay-start") || overlay.classList.contains("week-all-day-event-segment");
+      const canResizeEnd = overlay.classList.contains("event-overlay-end") || overlay.classList.contains("week-all-day-event-segment");
+
+      if (canResizeStart && offsetX < handleThreshold) cursor = "ew-resize";
+      else if (canResizeEnd && offsetX > overlayWidth - handleThreshold) cursor = "ew-resize";
+    }
   }
   overlay.style.cursor = cursor;
 }

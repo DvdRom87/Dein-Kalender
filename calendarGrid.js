@@ -246,12 +246,14 @@ function _generateTimedViewDOM(viewStartDate, numDaysToDisplay, mainContainerCla
 
   const timeAxisGutter = document.createElement("div");
   timeAxisGutter.className = "time-axis-gutter week-time-labels";
+  const hourLabelsFragment = document.createDocumentFragment();
   for (let hour = 0; hour < 24; hour++) {
     const hourLabel = document.createElement("div");
     hourLabel.className = "hour-label";
     hourLabel.textContent = `${String(hour).padStart(2, "0")}:00`;
-    timeAxisGutter.appendChild(hourLabel);
+    hourLabelsFragment.appendChild(hourLabel);
   }
+  timeAxisGutter.appendChild(hourLabelsFragment);
   mainContentRow.appendChild(timeAxisGutter);
 
   const daysContainer = document.createElement("div");
@@ -265,6 +267,7 @@ function _generateTimedViewDOM(viewStartDate, numDaysToDisplay, mainContainerCla
     if (dayInView.hasSame(todayDt, "day")) dayColumn.classList.add("today");
     if (dayInView.weekday === 6 || dayInView.weekday === 7) dayColumn.classList.add("weekend");
 
+    const hourSlotsFragment = document.createDocumentFragment();
     for (let hour = 0; hour < 24; hour++) {
       const hourSlot = document.createElement("div");
       hourSlot.className = "hour-slot";
@@ -278,8 +281,9 @@ function _generateTimedViewDOM(viewStartDate, numDaysToDisplay, mainContainerCla
           }
         });
       }
-      dayColumn.appendChild(hourSlot);
+      hourSlotsFragment.appendChild(hourSlot);
     }
+    dayColumn.appendChild(hourSlotsFragment);
     daysContainer.appendChild(dayColumn);
     localDayColumnElements.push(dayColumn);
   }
@@ -306,28 +310,64 @@ function applyStaticDayStyling(publicHolidays, schoolHolidays) {
   const dayElementsSelector = currentView === "week" || currentView === "day" ? ".week-day-header[data-date], .week-day-column[data-date], .week-all-day-slot[data-date]" : ".day[data-date]";
 
   document.querySelectorAll(dayElementsSelector).forEach((dayEl) => {
-    dayEl.classList.remove("holiday", "school-holiday");
-    let title = "";
     const date = dayEl.dataset.date;
+    let newTitleParts = [];
+    let hadHolidayClass = dayEl.classList.contains("holiday");
+    let hadSchoolHolidayClass = dayEl.classList.contains("school-holiday");
+    let needsHolidayClass = false;
+    let needsSchoolHolidayClass = false;
+
     if (publicHolidays && publicHolidays[date]) {
-      dayEl.classList.add("holiday");
-      title += publicHolidays[date].name;
+      needsHolidayClass = true;
+      newTitleParts.push(publicHolidays[date].name);
     }
     if (schoolHolidays && schoolHolidays[date]) {
+      needsSchoolHolidayClass = true;
+
+      let schoolHolidayText = `Schulferien: ${schoolHolidays[date].name}`;
+      if (!newTitleParts.some((p) => p.includes(schoolHolidays[date].name))) {
+        newTitleParts.push(schoolHolidayText);
+      } else if (!newTitleParts.some((p) => p.toLowerCase().includes("schulferien"))) {
+        newTitleParts.push(schoolHolidayText);
+      }
+    }
+
+    if (needsHolidayClass && !hadHolidayClass) {
+      dayEl.classList.add("holiday");
+    } else if (!needsHolidayClass && hadHolidayClass) {
+      dayEl.classList.remove("holiday");
+    }
+
+    if (needsSchoolHolidayClass && !hadSchoolHolidayClass) {
       dayEl.classList.add("school-holiday");
-      title += (title ? "\n" : "") + `Schulferien: ${schoolHolidays[date].name}`;
+    } else if (!needsSchoolHolidayClass && hadSchoolHolidayClass) {
+      dayEl.classList.remove("school-holiday");
     }
 
-    if (dayEl.classList.contains("week-day-column") && dayEl.title && title) {
-      dayEl.title = dayEl.title.includes(title) ? dayEl.title : (dayEl.title + (dayEl.title ? "\n" : "") + title).trim();
-    } else {
-      dayEl.title = title.trim() || "";
+    const newTitle = newTitleParts.join("\n").trim();
+    if (dayEl.title !== newTitle) {
+      dayEl.title = newTitle;
     }
 
-    if (dayEl.classList.contains("week-day-column") && (dayEl.classList.contains("holiday") || dayEl.classList.contains("school-holiday"))) {
+    if (dayEl.classList.contains("week-day-column")) {
+      const columnNeedsHoliday = dayEl.classList.contains("holiday");
+      const columnNeedsSchoolHoliday = dayEl.classList.contains("school-holiday");
+
       dayEl.querySelectorAll(".hour-slot").forEach((slot) => {
-        if (dayEl.classList.contains("holiday")) slot.classList.add("holiday");
-        if (dayEl.classList.contains("school-holiday")) slot.classList.add("school-holiday");
+        let slotHadHoliday = slot.classList.contains("holiday");
+        let slotHadSchoolHoliday = slot.classList.contains("school-holiday");
+
+        if (columnNeedsHoliday && !slotHadHoliday) {
+          slot.classList.add("holiday");
+        } else if (!columnNeedsHoliday && slotHadHoliday) {
+          slot.classList.remove("holiday");
+        }
+
+        if (columnNeedsSchoolHoliday && !slotHadSchoolHoliday) {
+          slot.classList.add("school-holiday");
+        } else if (!columnNeedsSchoolHoliday && slotHadSchoolHoliday) {
+          slot.classList.remove("school-holiday");
+        }
       });
     }
   });
@@ -433,7 +473,9 @@ async function updateCalendar(forceFullRedraw = false) {
     const startOfWeek = dtForWeekTitle.startOf("week");
     const endOfWeek = dtForWeekTitle.endOf("week");
     currentViewTitle.textContent = `KW ${startOfWeek.weekNumber}: ${startOfWeek.toFormat("dd.MM.")} - ${endOfWeek.toFormat("dd.MM.yyyy")}`;
-  } else currentViewTitle.textContent = `${currentDay}. ${GERMAN_MONTH_NAMES[currentMonth]} ${currentYear}`;
+  } else {
+    currentViewTitle.textContent = `${newDtForContext.toFormat("dd.MM.yyyy")}`;
+  }
 
   const stateChanged = stateSelect.dataset.prevState !== stateVal;
   let yearForHolidayFetch = currentYear;
@@ -457,8 +499,9 @@ async function updateCalendar(forceFullRedraw = false) {
 
   let holidayDataNeedsUpdate = structChange || stateChanged;
   if (!holidayDataNeedsUpdate && (currentView === "week" || currentView === "month")) {
-    const oldYearForHolidayFetch = oldDtForContext.startOf(currentView === "week" ? "week" : "month").year;
-    if (yearForHolidayFetch !== oldYearForHolidayFetch) {
+    const oldYearForHolidayContext = oldDtForContext.startOf(currentView === "week" ? "week" : "month").year;
+    const newYearForHolidayContext = newDtForContext.startOf(currentView === "week" ? "week" : "month").year;
+    if (newYearForHolidayContext !== oldYearForHolidayContext) {
       holidayDataNeedsUpdate = true;
     }
   }
@@ -492,17 +535,19 @@ async function updateCalendar(forceFullRedraw = false) {
     Promise.resolve().then(() => {
       requestAnimationFrame(() => renderEventVisuals(...renderArgs));
     });
-  } else {
-    console.error("renderEventVisuals func not found in calendarGrid.js");
   }
 }
 window.updateCalendar = updateCalendar;
 
 window.navigate = function (direction) {
   let dt = luxon.DateTime.local(currentYear, currentMonth + 1, currentDay, { zone: appDisplayTimezone });
-  if (currentView === "month") dt = dt.plus({ months: direction });
-  else if (currentView === "week") dt = dt.plus({ weeks: direction });
-  else if (currentView === "day") dt = dt.plus({ days: direction });
+  if (currentView === "month") {
+    dt = dt.plus({ months: direction });
+  } else if (currentView === "week") {
+    dt = dt.plus({ weeks: direction });
+  } else if (currentView === "day") {
+    dt = dt.plus({ days: direction });
+  }
 
   const prevYear = currentYear;
   currentYear = dt.year;
@@ -515,6 +560,7 @@ window.navigate = function (direction) {
       const newOption = document.createElement("option");
       newOption.value = currentYear;
       newOption.textContent = currentYear;
+
       let inserted = false;
       for (let i = 0; i < yearSelect.options.length; i++) {
         if (currentYear < parseInt(yearSelect.options[i].value)) {
@@ -524,10 +570,8 @@ window.navigate = function (direction) {
         }
       }
       if (!inserted) yearSelect.appendChild(newOption);
-      yearSelect.value = String(currentYear);
-    } else {
-      yearSelect.value = String(currentYear);
     }
+    yearSelect.value = String(currentYear);
     updateCalendar(true);
   } else {
     updateCalendar(true);

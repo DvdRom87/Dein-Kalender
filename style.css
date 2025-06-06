@@ -426,6 +426,7 @@ select:focus {
 
 .data-management-buttons {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   gap: var(--spacing-lg);
   margin-top: var(--spacing-xl);
@@ -649,6 +650,7 @@ select:focus {
 }
 .week-header-row, .week-all-day-row, .week-main-content-row {
   display: flex;
+  position: relative;
   border-bottom: 1px solid var(--color-border-grid);
 }
 .week-header-row {
@@ -833,7 +835,8 @@ select:focus {
   padding-left: 10px;
 }
 
-.week-all-day-event-segment {
+.week-all-day-event-segment,
+.resize-preview-segment {
   position: absolute;
   background-color: var(--color-accent-blue-base);
   color: var(--color-text-light);
@@ -848,6 +851,7 @@ select:focus {
   box-sizing: border-box;
   margin: 1px 0;
   height: var(--height-event-overlay-standard);
+  z-index: 99;
 }
 
 .week-event-block {
@@ -953,7 +957,7 @@ select:focus {
 .event-overlay.dragging-original-hidden,
 .week-event-block.dragging-original-hidden,
 .week-all-day-event-segment.dragging-original-hidden {
-  display: none !important; /* This will remove it from layout and pointer events */
+  display: none !important;
 }
 
 .resize-preview-segment {
@@ -1069,11 +1073,8 @@ select:focus {
   .calendar-container.month-view {
     max-width: 95%;
   }
-  .calendar-container.week-view .week-grid-content {
-    min-width: 600px;
-  }
   .calendar-container.week-view .time-axis-gutter {
-    flex: 0 0 50px;
+    flex: 0 0 60px;
     font-size: var(--font-size-xs);
   }
   .calendar-container.week-view .week-day-header,
@@ -1098,17 +1099,8 @@ select:focus {
   .datetime-container {
     gap: var(--spacing-md);
   }
-  .calendar-container.week-view .week-grid-content {
-    min-width: 100%;
-  }
   .calendar-container.week-view .time-axis-gutter {
-    flex: 0 0 40px;
     font-size: 0.65rem;
-  }
-  .calendar-container.week-view .week-day-header,
-  .calendar-container.week-view .week-all-day-slot,
-  .calendar-container.week-view .week-day-column {
-    min-width: 70px;
   }
   .week-event-block {
     font-size: 0.65rem;
@@ -1136,10 +1128,9 @@ select:focus {
   .month-view .kw-cell {
     font-size: var(--font-size-xs);
     min-height: auto;
-    height: 50px;
   }
   .month-view .day {
-    min-height: 50px;
+    min-height: 80px;
   }
 }
 

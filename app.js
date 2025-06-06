@@ -70,11 +70,10 @@ function getCommonIANATimezones() {
       timezones = Intl.supportedValuesOf("timeZone");
     } catch (e) {
       console.warn("Intl.supportedValuesOf('timeZone') threw an error, using fallback list.", e);
-      timezones = []; // Fallback to empty if error
+      timezones = [];
     }
   }
   if (timezones.length === 0) {
-    // If Intl failed or returned empty
     timezones = ["UTC", "Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Moscow", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Phoenix", "America/Anchorage", "America/Honolulu", "Pacific/Auckland", "Australia/Sydney", "Australia/Perth", "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata", "Asia/Dubai", "Africa/Cairo", "Africa/Nairobi"];
   }
   return timezones.filter((tz) => tz && (tz === "UTC" || tz.includes("/"))).sort();
