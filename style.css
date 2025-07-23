@@ -1142,3 +1142,8 @@ select:focus {
 .day-view .week-day-column {
   flex: 1 1 100%;
 }
+
+.version {
+  text-align: center;
+  font-size: 0.8em;
+}
