@@ -768,7 +768,6 @@ select:focus {
   font-size: var(--font-size-sm);
   color: var(--color-text-light);
   text-align: left;
-  padding: 0 3px 0 10px;
   box-sizing: border-box;
   display: flex;
   align-items: center;
