@@ -184,13 +184,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   const handleResize = debounce(() => {
-    if (typeof window.clearCalendarGeometryCache === "function") {
-      window.clearCalendarGeometryCache(true);
-    }
-    if (typeof renderEventVisuals === "function") {
-      renderEventVisuals();
+    if (typeof updateCalendar === "function") {
+      updateCalendar(true);
     } else {
-      console.error("renderEventVisuals function not found for resize handling.");
+      console.error("updateCalendar function not found for resize handling.");
     }
   }, 250);
   window.addEventListener("resize", handleResize);
